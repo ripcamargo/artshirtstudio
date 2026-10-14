@@ -2,6 +2,17 @@ export type Side = 'front' | 'back';
 export type MockupId = 'black' | 'white' | 'wine' | 'gray' | 'navy';
 export type ToolMode = 'select' | 'eraser' | 'remove-bg';
 
+export type RGB = [number, number, number];
+
+export interface ColorLayer {
+  id: string;
+  color: RGB;
+  /** Fração da arte ocupada por essa cor (0..1). */
+  share: number;
+  /** Intensidade: 1 = original, 0 = oculta. */
+  level: number;
+}
+
 export interface DesignElement {
   id: string;
   name: string;
@@ -11,6 +22,9 @@ export interface DesignElement {
   scale: number;
   rotation: number;
   opacity: number;
+  /** -100 (preto e branco) .. 0 (original) .. 100 (saturação máxima) */
+  saturation?: number;
+  colorLayers?: ColorLayer[];
   visible: boolean;
   naturalWidth: number;
   naturalHeight: number;

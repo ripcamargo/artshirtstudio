@@ -1,4 +1,5 @@
 import type { DesignElement } from '../types/editor';
+import { hasActiveColorLayers, renderColorLayers } from './colorLayers';
 
 export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -7,6 +8,61 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
     image.onerror = () => reject(new Error('Unable to load image'));
     image.src = src;
   });
+}
+
+/** Converte o valor do controle (-100..100) no fator do filtro saturate (0 = P&B, 1 = original, 5 = estourado). */
+export function saturationToFactor(value = 0): number {
+  return value <= 0 ? 1 + value / 100 : 1 + (value / 100) * 4;
+}
+
+async function prepareElementImage(element: DesignElement): Promise<HTMLCanvasElement | HTMLImageElement> {
+  const image = await loadImage(element.image);
+  const factor = saturationToFactor(element.saturation);
+  const colorLayers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
+  if (factor === 1 && !colorLayers) {
+    return image;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return image;
+  }
+
+  let imageData: ImageData;
+  if (colorLayers) {
+    imageData = await renderColorLayers(element.image, colorLayers);
+  } else {
+    ctx.drawImage(image, 0, 0);
+    imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+  if (factor === 1) {
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  const data = imageData.data;
+  const s = factor;
+  // Mesma matriz do filtro CSS saturate(), para o export bater com o preview.
+  const m = [
+    0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s,
+    0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s,
+    0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s,
+  ];
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    data[i] = m[0] * r + m[1] * g + m[2] * b;
+    data[i + 1] = m[3] * r + m[4] * g + m[5] * b;
+    data[i + 2] = m[6] * r + m[7] * g + m[8] * b;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
 }
 
 export async function renderMockupComposition({
@@ -37,9 +93,9 @@ export async function renderMockupComposition({
       continue;
     }
 
-    const image = await loadImage(element.image);
-    const naturalWidth = image.naturalWidth || image.width;
-    const naturalHeight = image.naturalHeight || image.height;
+    const image = await prepareElementImage(element);
+    const naturalWidth = image.width;
+    const naturalHeight = image.height;
     const normalizedX = element.x > 1 ? element.x / 1000 : element.x;
     const normalizedY = element.y > 1 ? element.y / 1000 : element.y;
     const scaleFactor = Math.min(canvasWidth, canvasHeight) / 1000;
@@ -52,7 +108,13 @@ export async function renderMockupComposition({
     context.globalAlpha = element.opacity;
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = 'high';
-    context.drawImage(image, -width / 2, -height / 2, width, height);
+    context.drawImage(
+      image,
+      -width / 2,
+      -height / 2,
+      width,
+      height,
+    );
     context.restore();
   }
 

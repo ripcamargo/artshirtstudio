@@ -1,13 +1,76 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, WandSparkles } from 'lucide-react';
+import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { MOCKUP_BY_ID, MOCKUPS } from './config/mockups';
 import { removeSolidBackground } from './utils/backgroundRemoval';
-import { applyEraserToImage, loadImage, renderMockupComposition } from './utils/canvasRenderer';
+import { detectColors, hasActiveColorLayers, renderColorLayers, toHex } from './utils/colorLayers';
+import { applyEraserToImage, loadImage, renderMockupComposition, saturationToFactor } from './utils/canvasRenderer';
 import { exportZip } from './utils/zipExporter';
-import type { AppState, DesignElement, MockupId, Side, ToolMode } from './types/editor';
+import type { AppState, ColorLayer, DesignElement, MockupId, Side, ToolMode } from './types/editor';
 import './App.css';
 
 const STORAGE_KEY = 'tshirt-mockup-creator-v1';
+const HISTORY_LIMIT = 50;
+const ZOOM_LEVELS = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6];
+const EXPORT_SIDES: Array<{ id: Side; label: string; fileSuffix: string }> = [
+  { id: 'front', label: 'Frente', fileSuffix: 'frente' },
+  { id: 'back', label: 'Costas', fileSuffix: 'costas' },
+];
+
+interface StagePoint {
+  /** Posição no palco em pixels sem zoom (o mesmo sistema de coordenadas das artes). */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Converte o ponteiro para coordenadas do palco sem zoom. O zoom é só visual (transform),
+ * então desfazer a escala aqui garante que posição, borracha etc. não mudam com ele.
+ */
+function toStagePoint(content: HTMLElement, clientX: number, clientY: number): StagePoint {
+  const rect = content.getBoundingClientRect();
+  const width = content.offsetWidth;
+  const height = content.offsetHeight;
+  const scale = rect.width / width || 1;
+
+  return {
+    x: (clientX - rect.left) / scale,
+    y: (clientY - rect.top) / scale,
+    width,
+    height,
+  };
+}
+
+function clampPan(pan: { x: number; y: number }, zoom: number, stage: HTMLElement | null) {
+  if (!stage) {
+    return { x: 0, y: 0 };
+  }
+
+  const maxX = ((zoom - 1) * stage.clientWidth) / 2;
+  const maxY = ((zoom - 1) * stage.clientHeight) / 2;
+  return {
+    x: Math.max(-maxX, Math.min(maxX, pan.x)),
+    y: Math.max(-maxY, Math.min(maxY, pan.y)),
+  };
+}
+
+/** Só conta como passo de histórico o que muda as artes (não seleção, lado ou cor). */
+function sameArtwork(a: AppState, b: AppState) {
+  return a.front.elements === b.front.elements && a.back.elements === b.back.elements;
+}
+
+function isTextField(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable || target instanceof HTMLTextAreaElement) {
+    return true;
+  }
+
+  return target instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button'].includes(target.type);
+}
 
 function buildSampleArt(): string {
   const svg = `
@@ -82,6 +145,40 @@ function normalizePosition(value: number) {
   return value;
 }
 
+/** Mostra a arte; quando há cores reduzidas/ocultas, desenha a versão processada num canvas. */
+function ArtImage({ element }: { element: DesignElement }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const layers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!layers || !canvas) {
+      return;
+    }
+
+    let cancelled = false;
+    void renderColorLayers(element.image, layers).then((imageData) => {
+      if (cancelled) {
+        return;
+      }
+
+      canvas.width = imageData.width;
+      canvas.height = imageData.height;
+      canvas.getContext('2d')?.putImageData(imageData, 0, 0);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [element.image, layers]);
+
+  if (!layers) {
+    return <img src={element.image} alt={element.name} draggable={false} />;
+  }
+
+  return <canvas ref={canvasRef} role="img" aria-label={element.name} />;
+}
+
 function App() {
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -98,15 +195,27 @@ function App() {
   const [toolMode, setToolMode] = useState<ToolMode>('select');
   const [eraserSize, setEraserSize] = useState(26);
   const [tolerance, setTolerance] = useState(28);
+  const [colorCount, setColorCount] = useState(8);
+  const [detectingColors, setDetectingColors] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [status, setStatus] = useState('Pronto');
   const [selectedColors, setSelectedColors] = useState<MockupId[]>(['black', 'white', 'wine', 'gray', 'navy']);
+  const [selectedSides, setSelectedSides] = useState<Side[]>(['front', 'back']);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [eraserCursor, setEraserCursor] = useState({ x: 0, y: 0, visible: false });
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panStartRef = useRef<{ clientX: number; clientY: number; x: number; y: number } | null>(null);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const eraseActiveRef = useRef(false);
+  const stateRef = useRef(state);
+  const pastRef = useRef<AppState[]>([]);
+  const futureRef = useRef<AppState[]>([]);
+  const restoringRef = useRef(false);
+  const [historyCounts, setHistoryCounts] = useState({ past: 0, future: 0 });
 
   const activeMockup = MOCKUP_BY_ID[state.activeColor];
   const activeSideState = state[state.activeSide];
@@ -118,7 +227,96 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    stateRef.current = state;
   }, [state]);
+
+  const syncHistoryCounts = () => {
+    setHistoryCounts({ past: pastRef.current.length, future: futureRef.current.length });
+  };
+
+  // Uma nova edição (que não seja desfazer/refazer) invalida o "refazer".
+  useEffect(() => {
+    if (restoringRef.current) {
+      restoringRef.current = false;
+      return;
+    }
+
+    if (futureRef.current.length > 0) {
+      futureRef.current = [];
+      setHistoryCounts((counts) => ({ ...counts, future: 0 }));
+    }
+  }, [state.front.elements, state.back.elements]);
+
+  /** Guarda o estado atual antes de uma edição, para poder desfazê-la. */
+  const checkpoint = () => {
+    const snapshot = stateRef.current;
+    const past = pastRef.current;
+    if (past.length > 0 && sameArtwork(past[past.length - 1], snapshot)) {
+      return;
+    }
+
+    past.push(snapshot);
+    if (past.length > HISTORY_LIMIT) {
+      past.shift();
+    }
+    syncHistoryCounts();
+  };
+
+  const restoreSnapshot = (from: AppState[], to: AppState[], label: string) => {
+    const current = stateRef.current;
+    let entry = from.pop();
+    // Descarta passos que não mudaram nada (ex.: clique sem arrastar).
+    while (entry && sameArtwork(entry, current)) {
+      entry = from.pop();
+    }
+
+    if (!entry) {
+      syncHistoryCounts();
+      return;
+    }
+
+    to.push(current);
+    const next: AppState = {
+      ...entry,
+      activeColor: current.activeColor,
+      productName: current.productName,
+    };
+    restoringRef.current = true;
+    stateRef.current = next;
+    setState(next);
+    syncHistoryCounts();
+    setStatus(label);
+  };
+
+  const undo = () => restoreSnapshot(pastRef.current, futureRef.current, 'Desfeito');
+  const redo = () => restoreSnapshot(futureRef.current, pastRef.current, 'Refeito');
+
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  useEffect(() => {
+    undoRef.current = undo;
+    redoRef.current = redo;
+  });
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || isTextField(event.target)) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === 'z' && !event.shiftKey) {
+        event.preventDefault();
+        undoRef.current();
+      } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+        event.preventDefault();
+        redoRef.current();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   useEffect(() => {
     if (!exportMenuOpen) {
@@ -165,7 +363,7 @@ function App() {
     }));
   };
 
-  const handleAddImages = async (files: File[] | FileList | null) => {
+  const handleAddImages = async (files: File[] | FileList | null, nameOverride?: string) => {
     if (!files || files.length === 0) {
       return;
     }
@@ -178,13 +376,14 @@ function App() {
 
         return {
           id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          name: file.name.replace(/\.[^/.]+$/, '') || 'Arte',
+          name: nameOverride ?? (file.name.replace(/\.[^/.]+$/, '') || 'Arte'),
           image: url,
           x: 0.5,
           y: 0.5,
           scale: Math.min(0.9, 480 / Math.max(image.naturalWidth, image.naturalHeight)),
           rotation: 0,
           opacity: 1,
+          saturation: 0,
           visible: true,
           naturalWidth: image.naturalWidth,
           naturalHeight: image.naturalHeight,
@@ -192,6 +391,7 @@ function App() {
       }),
     );
 
+    checkpoint();
     updateCurrentSide((current) => {
       const side = current[current.activeSide];
       const updated = [...side.elements, ...entries];
@@ -207,6 +407,28 @@ function App() {
 
     setStatus(`${entries.length} imagem(ns) adicionada(s)`);
   };
+
+  const handleAddImagesRef = useRef(handleAddImages);
+  useEffect(() => {
+    handleAddImagesRef.current = handleAddImages;
+  });
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const images = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+        file.type.startsWith('image/'),
+      );
+      if (images.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      void handleAddImagesRef.current(images, 'Imagem colada');
+    };
+
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, []);
 
   const updateSelectedElement = (patch: Partial<DesignElement>) => {
     if (!selectedElement) {
@@ -230,6 +452,7 @@ function App() {
   };
 
   const handleDeleteElement = (elementId: string) => {
+    checkpoint();
     updateCurrentSide((current) => {
       const side = current[current.activeSide];
       const filtered = side.elements.filter((element) => element.id !== elementId);
@@ -247,6 +470,7 @@ function App() {
   };
 
   const handleToggleVisibility = (elementId: string) => {
+    checkpoint();
     updateCurrentSide((current) => {
       const side = current[current.activeSide];
       const elements = side.elements.map((element) =>
@@ -264,15 +488,16 @@ function App() {
   };
 
   const applyEraser = async (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
-    if (!previewRef.current || !element.visible) {
+    if (!contentRef.current || !element.visible) {
       return;
     }
 
-    const rect = previewRef.current.getBoundingClientRect();
-    const stageWidth = previewRef.current.clientWidth;
-    const stageHeight = previewRef.current.clientHeight;
-    const pointerX = event.clientX - rect.left - previewRef.current.clientLeft;
-    const pointerY = event.clientY - rect.top - previewRef.current.clientTop;
+    const {
+      x: pointerX,
+      y: pointerY,
+      width: stageWidth,
+      height: stageHeight,
+    } = toStagePoint(contentRef.current, event.clientX, event.clientY);
     const centerX = normalizePosition(element.x) * stageWidth;
     const centerY = normalizePosition(element.y) * stageHeight;
     const displayWidth = Math.max(40, element.naturalWidth * element.scale * 0.45);
@@ -331,6 +556,7 @@ function App() {
 
     try {
       const cleaned = await removeSolidBackground(selectedElement.image, tolerance);
+      checkpoint();
       updateCurrentSide((current) => {
         const side = current[current.activeSide];
         const updated = side.elements.map((element) =>
@@ -351,11 +577,61 @@ function App() {
     }
   };
 
+  const handleDetectColors = async () => {
+    if (!selectedElement) {
+      return;
+    }
+
+    setDetectingColors(true);
+    setStatus('Analisando cores...');
+    try {
+      const layers = await detectColors(selectedElement.image, colorCount);
+      checkpoint();
+      updateSelectedElement({ colorLayers: layers });
+      setStatus(`${layers.length} cores encontradas`);
+    } catch {
+      setStatus('Não foi possível analisar as cores');
+    } finally {
+      setDetectingColors(false);
+    }
+  };
+
+  const updateColorLayer = (layerId: string, patch: Partial<ColorLayer>) => {
+    if (!selectedElement?.colorLayers) {
+      return;
+    }
+
+    updateSelectedElement({
+      colorLayers: selectedElement.colorLayers.map((layer) =>
+        layer.id === layerId ? { ...layer, ...patch } : layer,
+      ),
+    });
+  };
+
+  const resetColorLayers = () => {
+    if (!selectedElement?.colorLayers) {
+      return;
+    }
+
+    checkpoint();
+    updateSelectedElement({
+      colorLayers: selectedElement.colorLayers.map((layer) => ({ ...layer, level: 1 })),
+    });
+  };
+
   const toggleColorSelection = (colorId: MockupId) => {
     setSelectedColors((current) =>
       current.includes(colorId)
         ? current.filter((id) => id !== colorId)
         : [...current, colorId],
+    );
+  };
+
+  const toggleSideSelection = (side: Side) => {
+    setSelectedSides((current) =>
+      current.includes(side)
+        ? current.filter((id) => id !== side)
+        : [...current, side],
     );
   };
 
@@ -365,31 +641,31 @@ function App() {
       return;
     }
 
+    if (selectedSides.length === 0) {
+      setStatus('Selecione frente, costas ou ambos');
+      return;
+    }
+
     setExporting(true);
     setStatus('Exportando mockups...');
 
     try {
       const files: Array<{ name: string; dataUrl: string }> = [];
       const mockupsToExport = MOCKUPS.filter((mockup) => selectedColors.includes(mockup.id));
+      const sidesToExport = EXPORT_SIDES.filter((side) => selectedSides.includes(side.id));
 
       for (const mockup of mockupsToExport) {
-        const frontPng = await renderMockupComposition({
-          mockupImage: mockup.front,
-          elements: state.front.elements,
-        });
-        const backPng = await renderMockupComposition({
-          mockupImage: mockup.back,
-          elements: state.back.elements,
-        });
+        for (const side of sidesToExport) {
+          const png = await renderMockupComposition({
+            mockupImage: mockup[side.id],
+            elements: state[side.id].elements,
+          });
 
-        files.push({
-          name: `${toSafeFileName(state.productName)}-${toSafeFileName(mockup.name)}-frente.png`,
-          dataUrl: frontPng,
-        });
-        files.push({
-          name: `${toSafeFileName(state.productName)}-${toSafeFileName(mockup.name)}-costas.png`,
-          dataUrl: backPng,
-        });
+          files.push({
+            name: `${toSafeFileName(state.productName)}-${toSafeFileName(mockup.name)}-${side.fileSuffix}.png`,
+            dataUrl: png,
+          });
+        }
       }
 
       await exportZip({
@@ -397,7 +673,7 @@ function App() {
         files,
       });
       setExportMenuOpen(false);
-      setStatus(`${files.length / 2} cores exportadas`);
+      setStatus(`${files.length} imagens exportadas`);
     } catch {
       setStatus('Erro ao exportar o ZIP');
     } finally {
@@ -406,6 +682,7 @@ function App() {
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
+    checkpoint();
     if (toolMode === 'eraser') {
       eraseActiveRef.current = true;
       void applyEraser(event, element);
@@ -424,13 +701,13 @@ function App() {
       return;
     }
 
-    const rect = previewRef.current?.getBoundingClientRect();
-    if (!rect) {
+    if (!contentRef.current) {
       return;
     }
 
-    const x = (event.clientX - rect.left) / rect.width;
-    const y = (event.clientY - rect.top) / rect.height;
+    const point = toStagePoint(contentRef.current, event.clientX, event.clientY);
+    const x = point.x / point.width;
+    const y = point.y / point.height;
 
     updateSelectedElement({ x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) });
   };
@@ -440,17 +717,77 @@ function App() {
     eraseActiveRef.current = false;
   };
 
-  const handlePreviewPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (toolMode !== 'eraser' || !previewRef.current) {
+  const changeZoom = (direction: 1 | -1) => {
+    const index = ZOOM_LEVELS.findIndex((level) => level >= zoom);
+    const nextIndex = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, index + direction));
+    const nextZoom = ZOOM_LEVELS[nextIndex];
+    // Mantém o mesmo ponto no centro da tela ao trocar o zoom.
+    const ratio = nextZoom / zoom;
+    setZoom(nextZoom);
+    setPan((current) => clampPan({ x: current.x * ratio, y: current.y * ratio }, nextZoom, previewRef.current));
+  };
+
+  const resetZoom = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  // Com zoom, a roda do mouse navega pela imagem em vez de rolar a página.
+  useEffect(() => {
+    const stage = previewRef.current;
+    if (!stage || zoom === 1) {
       return;
     }
 
-    const rect = previewRef.current.getBoundingClientRect();
-    setEraserCursor({
-      x: event.clientX - rect.left - previewRef.current.clientLeft,
-      y: event.clientY - rect.top - previewRef.current.clientTop,
-      visible: true,
-    });
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const dx = event.shiftKey ? event.deltaY : event.deltaX;
+      const dy = event.shiftKey ? 0 : event.deltaY;
+      setPan((current) => clampPan({ x: current.x - dx, y: current.y - dy }, zoom, stage));
+    };
+
+    stage.addEventListener('wheel', handleWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', handleWheel);
+  }, [zoom]);
+
+  // Arrastar uma área vazia do palco (com zoom) move a visualização.
+  const handleStagePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (zoom === 1 || target.closest('.art-layer, .zoom-controls')) {
+      return;
+    }
+
+    panStartRef.current = { clientX: event.clientX, clientY: event.clientY, ...pan };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePreviewPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const panStart = panStartRef.current;
+    if (panStart) {
+      setPan(
+        clampPan(
+          {
+            x: panStart.x + event.clientX - panStart.clientX,
+            y: panStart.y + event.clientY - panStart.clientY,
+          },
+          zoom,
+          previewRef.current,
+        ),
+      );
+      return;
+    }
+
+    if (toolMode !== 'eraser' || !contentRef.current) {
+      return;
+    }
+
+    const point = toStagePoint(contentRef.current, event.clientX, event.clientY);
+    setEraserCursor({ x: point.x, y: point.y, visible: true });
+  };
+
+  const handleStagePointerUp = () => {
+    panStartRef.current = null;
+    handlePointerUp();
   };
 
   return (
@@ -547,13 +884,47 @@ function App() {
                       ))}
                     </div>
                   </div>
+                  <div className="export-side-picker">
+                    <div className="list-header">
+                      <span>Lados para exportar</span>
+                    </div>
+                    <div className="side-checklist">
+                      {EXPORT_SIDES.map((side) => {
+                        const checked = selectedSides.includes(side.id);
+
+                        return (
+                          <label key={side.id} className="side-toggle">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleSideSelection(side.id)}
+                              aria-label={`Exportar ${side.label}`}
+                            />
+                            <span className="side-chip">
+                              <span className="side-check" aria-hidden="true">
+                                {checked && <Check />}
+                              </span>
+                              {side.label}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
                   <button
                     className="primary-action"
                     type="button"
                     onClick={() => void handleExportAll()}
-                    disabled={exporting}
+                    disabled={exporting || selectedColors.length === 0 || selectedSides.length === 0}
+                    aria-busy={exporting || undefined}
                   >
-                    {exporting ? 'Exportando...' : 'Exportar selecionadas'}
+                    {exporting
+                      ? 'Exportando...'
+                      : selectedColors.length === 0
+                        ? 'Selecione uma cor'
+                        : selectedSides.length === 0
+                          ? 'Selecione um lado'
+                          : `Exportar ${selectedColors.length * selectedSides.length} imagens`}
                   </button>
                 </div>
               )}
@@ -574,14 +945,20 @@ function App() {
 
           <div
             ref={previewRef}
-            className={`preview-stage ${toolMode === 'eraser' ? 'eraser-active' : ''}`}
+            className={`preview-stage ${toolMode === 'eraser' ? 'eraser-active' : ''} ${zoom > 1 ? 'zoomed' : ''}`}
+            onPointerDown={handleStagePointerDown}
             onPointerMove={handlePreviewPointerMove}
             onPointerLeave={() => {
-              handlePointerUp();
+              handleStagePointerUp();
               setEraserCursor((cursor) => ({ ...cursor, visible: false }));
             }}
-            onPointerUp={handlePointerUp}
+            onPointerUp={handleStagePointerUp}
           >
+            <div
+              ref={contentRef}
+              className="preview-content"
+              style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+            >
             <img
               src={activeMockup[state.activeSide]}
               alt="Mockup base"
@@ -603,6 +980,7 @@ function App() {
                     width: `${displayWidth}px`,
                     height: `${displayHeight}px`,
                     opacity: element.opacity,
+                    filter: element.saturation ? `saturate(${saturationToFactor(element.saturation)})` : undefined,
                     visibility: element.visible ? 'visible' : 'hidden',
                     transform: `translate(-50%, -50%) rotate(${element.rotation}deg)`,
                   }}
@@ -610,7 +988,7 @@ function App() {
                   onPointerMove={(event) => handlePointerMove(event, element)}
                   onPointerUp={handlePointerUp}
                 >
-                  <img src={element.image} alt={element.name} draggable={false} />
+                  <ArtImage element={element} />
                 </div>
               );
             })}
@@ -626,6 +1004,37 @@ function App() {
                 }}
               />
             )}
+            </div>
+
+            <div className="zoom-controls" aria-label="Zoom de visualização">
+              <button
+                type="button"
+                title="Diminuir zoom"
+                aria-label="Diminuir zoom"
+                disabled={zoom === ZOOM_LEVELS[0]}
+                onClick={() => changeZoom(-1)}
+              >
+                <ZoomOut aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="zoom-value"
+                title="Voltar para 100%"
+                aria-label={`Zoom ${Math.round(zoom * 100)}%. Voltar para 100%`}
+                onClick={resetZoom}
+              >
+                {`${Math.round(zoom * 100)}%`}
+              </button>
+              <button
+                type="button"
+                title="Aumentar zoom"
+                aria-label="Aumentar zoom"
+                disabled={zoom === ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
+                onClick={() => changeZoom(1)}
+              >
+                <ZoomIn aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </section>
 
@@ -673,6 +1082,25 @@ function App() {
             >
               <WandSparkles aria-hidden="true" />
             </button>
+            <span aria-hidden="true" />
+            <button
+              type="button"
+              title="Desfazer (Ctrl+Z)"
+              aria-label="Desfazer"
+              disabled={historyCounts.past === 0}
+              onClick={undo}
+            >
+              <Undo2 aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              title="Refazer (Ctrl+Y)"
+              aria-label="Refazer"
+              disabled={historyCounts.future === 0}
+              onClick={redo}
+            >
+              <Redo2 aria-hidden="true" />
+            </button>
           </div>
 
           <div className="controls-list">
@@ -686,6 +1114,8 @@ function App() {
                     max="2"
                     step="0.01"
                     value={selectedElement.scale}
+                    onPointerDown={checkpoint}
+                    onKeyDown={checkpoint}
                     onChange={(event) => updateSelectedElement({ scale: Number(event.target.value) })}
                   />
                   <strong>{`${selectedElement.scale.toFixed(2)}x`}</strong>
@@ -699,6 +1129,8 @@ function App() {
                     max="180"
                     step="1"
                     value={selectedElement.rotation}
+                    onPointerDown={checkpoint}
+                    onKeyDown={checkpoint}
                     onChange={(event) => updateSelectedElement({ rotation: Number(event.target.value) })}
                   />
                   <strong>{`${selectedElement.rotation.toFixed(0)}°`}</strong>
@@ -712,9 +1144,35 @@ function App() {
                     max="1"
                     step="0.01"
                     value={selectedElement.opacity}
+                    onPointerDown={checkpoint}
+                    onKeyDown={checkpoint}
                     onChange={(event) => updateSelectedElement({ opacity: Number(event.target.value) })}
                   />
                   <strong>{`${Math.round((selectedElement.opacity || 0) * 100)}%`}</strong>
+                </label>
+
+                <label>
+                  <span>Saturação</span>
+                  <input
+                    type="range"
+                    min="-100"
+                    max="100"
+                    step="1"
+                    value={selectedElement.saturation ?? 0}
+                    onPointerDown={checkpoint}
+                    onKeyDown={checkpoint}
+                    onChange={(event) => updateSelectedElement({ saturation: Number(event.target.value) })}
+                    onDoubleClick={() => {
+                      checkpoint();
+                      updateSelectedElement({ saturation: 0 });
+                    }}
+                    title="Duplo clique para voltar ao original"
+                  />
+                  <strong>
+                    {(selectedElement.saturation ?? 0) === 0
+                      ? 'Original'
+                      : `${(selectedElement.saturation ?? 0) > 0 ? '+' : ''}${selectedElement.saturation}`}
+                  </strong>
                 </label>
 
               </>
@@ -736,10 +1194,103 @@ function App() {
               </div>
             )}
 
-            {showBackgroundControls && (
+            {showBackgroundControls && !selectedElement && (
+              <p className="panel-hint">Selecione uma arte para ajustar as cores.</p>
+            )}
+
+            {showBackgroundControls && selectedElement && (
               <div className="removal-controls">
+              <div className="color-layers">
+                <div className="list-header">
+                  <span>Cores da arte</span>
+                  {selectedElement.colorLayers && selectedElement.colorLayers.length > 0 && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="Restaurar todas as cores"
+                      aria-label="Restaurar todas as cores"
+                      disabled={!hasActiveColorLayers(selectedElement.colorLayers)}
+                      onClick={resetColorLayers}
+                    >
+                      <RotateCcw aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+
+                <label>
+                  <span>Quantidade de cores</span>
+                  <input
+                    type="range"
+                    min="2"
+                    max="16"
+                    step="1"
+                    value={colorCount}
+                    onChange={(event) => setColorCount(Number(event.target.value))}
+                  />
+                  <strong>{`até ${colorCount}`}</strong>
+                </label>
+                <button
+                  type="button"
+                  disabled={detectingColors}
+                  onClick={() => void handleDetectColors()}
+                >
+                  {detectingColors
+                    ? 'Analisando...'
+                    : selectedElement.colorLayers
+                      ? 'Detectar novamente'
+                      : 'Detectar cores'}
+                </button>
+
+                {selectedElement.colorLayers && (
+                  <ul className="color-layer-list">
+                    {selectedElement.colorLayers.map((layer) => {
+                      const hex = toHex(layer.color);
+                      const hidden = layer.level === 0;
+
+                      return (
+                        <li key={layer.id} className={hidden ? 'hidden-color' : ''}>
+                          <span
+                            className="color-layer-swatch"
+                            style={{ backgroundColor: hex }}
+                            title={`${hex.toUpperCase()} · ${(layer.share * 100).toFixed(1)}% da arte`}
+                            aria-hidden="true"
+                          />
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={Math.round(layer.level * 100)}
+                            aria-label={`Intensidade da cor ${hex.toUpperCase()}`}
+                            onPointerDown={checkpoint}
+                            onKeyDown={checkpoint}
+                            onChange={(event) =>
+                              updateColorLayer(layer.id, { level: Number(event.target.value) / 100 })
+                            }
+                          />
+                          <strong>{`${Math.round(layer.level * 100)}%`}</strong>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title={hidden ? 'Mostrar cor' : 'Ocultar cor'}
+                            aria-label={`${hidden ? 'Mostrar' : 'Ocultar'} cor ${hex.toUpperCase()}`}
+                            aria-pressed={hidden}
+                            onClick={() => {
+                              checkpoint();
+                              updateColorLayer(layer.id, { level: hidden ? 1 : 0 });
+                            }}
+                          >
+                            {hidden ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+
               <label>
-                <span>Remover fundo</span>
+                <span>Remover fundo automático</span>
                 <input
                   type="range"
                   min="0"
