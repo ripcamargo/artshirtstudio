@@ -52,6 +52,78 @@ export async function removeSolidBackground(imageDataUrl: string, tolerance: num
   return canvas.toDataURL('image/png');
 }
 
+export async function removeColorAt(
+  imageDataUrl: string,
+  x: number,
+  y: number,
+  tolerance: number,
+): Promise<string | null> {
+  const img = await loadImage(imageDataUrl);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth || img.width;
+  canvas.height = img.naturalHeight || img.height;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return null;
+  }
+
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = pixels;
+
+  const px = Math.max(0, Math.min(canvas.width - 1, Math.floor(x)));
+  const py = Math.max(0, Math.min(canvas.height - 1, Math.floor(y)));
+  const target = (py * canvas.width + px) * 4;
+
+  // Clique em área já transparente: nada a remover.
+  if (data[target + 3] === 0) {
+    return null;
+  }
+
+  const tr = data[target];
+  const tg = data[target + 1];
+  const tb = data[target + 2];
+  const limit = tolerance * 4.5;
+
+  // Preenchimento por inundação: apaga só a região contínua ligada ao pixel clicado.
+  const { width, height } = canvas;
+  const visited = new Uint8Array(width * height);
+  const stack = [py * width + px];
+  visited[py * width + px] = 1;
+
+  while (stack.length > 0) {
+    const pixel = stack.pop()!;
+    const index = pixel * 4;
+    const distance =
+      Math.abs(data[index] - tr) + Math.abs(data[index + 1] - tg) + Math.abs(data[index + 2] - tb);
+    if (data[index + 3] === 0 || distance > limit) {
+      continue;
+    }
+
+    data[index + 3] = 0;
+
+    const x0 = pixel % width;
+    const y0 = (pixel - x0) / width;
+    const neighbors = [
+      x0 > 0 ? pixel - 1 : -1,
+      x0 < width - 1 ? pixel + 1 : -1,
+      y0 > 0 ? pixel - width : -1,
+      y0 < height - 1 ? pixel + width : -1,
+    ];
+    for (const next of neighbors) {
+      if (next >= 0 && !visited[next]) {
+        visited[next] = 1;
+        stack.push(next);
+      }
+    }
+  }
+
+  ctx.putImageData(pixels, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();

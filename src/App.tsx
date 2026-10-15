@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { MOCKUP_BY_ID, MOCKUPS } from './config/mockups';
-import { removeSolidBackground } from './utils/backgroundRemoval';
+import { removeColorAt, removeSolidBackground } from './utils/backgroundRemoval';
 import { detectColors, hasActiveColorLayers, renderColorLayers, toHex } from './utils/colorLayers';
 import { applyEraserToImage, loadImage, renderMockupComposition, saturationToFactor } from './utils/canvasRenderer';
 import { exportZip } from './utils/zipExporter';
@@ -487,9 +487,10 @@ function App() {
     });
   };
 
-  const applyEraser = async (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
-    if (!contentRef.current || !element.visible) {
-      return;
+  // Converte a posição do ponteiro para coordenadas em pixels da imagem original da arte.
+  const toImagePoint = (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
+    if (!contentRef.current) {
+      return null;
     }
 
     const {
@@ -517,18 +518,26 @@ function App() {
     const localY = (localDisplayY + imageHeight / 2) / imageScale;
 
     if (localX < 0 || localX > element.naturalWidth || localY < 0 || localY > element.naturalHeight) {
+      return null;
+    }
+
+    return { x: localX, y: localY, imageScale };
+  };
+
+  const applyEraser = async (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
+    if (!element.visible) {
       return;
     }
 
-    const radius = eraserSize / imageScale;
+    const point = toImagePoint(event, element);
+    if (!point) {
+      return;
+    }
+
+    const radius = eraserSize / point.imageScale;
 
     try {
-      const erased = await applyEraserToImage(
-        element.image,
-        Math.max(0, Math.min(localX, element.naturalWidth)),
-        Math.max(0, Math.min(localY, element.naturalHeight)),
-        radius,
-      );
+      const erased = await applyEraserToImage(element.image, point.x, point.y, radius);
 
       updateCurrentSide((current) => {
         const side = current[current.activeSide];
@@ -574,6 +583,43 @@ function App() {
       setStatus('Fundo removido');
     } catch {
       setStatus('Não foi possível remover o fundo');
+    }
+  };
+
+  const handleRemoveColorAtPoint = async (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
+    if (!element.visible) {
+      return;
+    }
+
+    const point = toImagePoint(event, element);
+    if (!point) {
+      return;
+    }
+
+    try {
+      const cleaned = await removeColorAt(element.image, point.x, point.y, tolerance);
+      if (!cleaned) {
+        return;
+      }
+
+      checkpoint();
+      updateCurrentSide((current) => {
+        const side = current[current.activeSide];
+        const updated = side.elements.map((art) =>
+          art.id === element.id ? { ...art, image: cleaned } : art,
+        );
+
+        return {
+          ...current,
+          [current.activeSide]: {
+            ...side,
+            elements: updated,
+          },
+        };
+      });
+      setStatus('Cor removida');
+    } catch {
+      setStatus('Não foi possível remover a cor');
     }
   };
 
@@ -682,6 +728,12 @@ function App() {
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
+    if (toolMode === 'remove-bg') {
+      handleSelectElement(element.id);
+      void handleRemoveColorAtPoint(event, element);
+      return;
+    }
+
     checkpoint();
     if (toolMode === 'eraser') {
       eraseActiveRef.current = true;
@@ -945,7 +997,7 @@ function App() {
 
           <div
             ref={previewRef}
-            className={`preview-stage ${toolMode === 'eraser' ? 'eraser-active' : ''} ${zoom > 1 ? 'zoomed' : ''}`}
+            className={`preview-stage ${toolMode === 'eraser' ? 'eraser-active' : ''} ${toolMode === 'remove-bg' ? 'wand-active' : ''} ${zoom > 1 ? 'zoomed' : ''}`}
             onPointerDown={handleStagePointerDown}
             onPointerMove={handlePreviewPointerMove}
             onPointerLeave={() => {
@@ -1304,6 +1356,7 @@ function App() {
               <button type="button" onClick={() => void handleRemoveBackground()}>
                 Aplicar remoção
               </button>
+              <p className="panel-hint">Ou clique na arte com a varinha para apagar só a área daquela cor.</p>
               </div>
             )}
           </div>
