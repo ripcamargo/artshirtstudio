@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { DesignElement } from '../types/editor';
 import { loadImage } from '../utils/canvasRenderer';
 import { hasActiveColorLayers, renderColorLayers } from '../utils/colorLayers';
+import { applyHalftone } from '../utils/halftone';
 import { shadeArtWithFabric } from '../utils/fabricShading';
 import { normalizePosition } from '../utils/geometry';
 
@@ -15,6 +16,8 @@ export interface FabricShading {
 
 /** Resolução máxima (lado maior) do canvas que recebe o sombreado de tecido. */
 const SHADED_ART_MAX_SIZE = 1024;
+/** Com halftone os pontos precisam de mais resolução para não borrar na prévia. */
+const HALFTONE_ART_MAX_SIZE = 2048;
 
 /**
  * Mostra a arte. Com cores reduzidas/trocadas ou com o efeito de tecido, desenha a versão processada
@@ -25,7 +28,8 @@ export function ArtImage({ element, shading }: { element: DesignElement; shading
   const baseRef = useRef<HTMLCanvasElement | null>(null);
   const [baseVersion, setBaseVersion] = useState(0);
   const layers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
-  const useCanvas = Boolean(layers || shading);
+  const halftone = element.halftone?.enabled ? element.halftone : null;
+  const useCanvas = Boolean(layers || shading || halftone);
 
   // Arte-base (já com as cores ajustadas), redesenhada só quando a imagem ou as cores mudam.
   useEffect(() => {
@@ -48,6 +52,15 @@ export function ArtImage({ element, shading }: { element: DesignElement; shading
         base.getContext('2d')?.drawImage(image, 0, 0);
       }
 
+      if (halftone) {
+        const baseContext = base.getContext('2d', { willReadFrequently: true });
+        if (baseContext) {
+          const imageData = baseContext.getImageData(0, 0, base.width, base.height);
+          applyHalftone(imageData, halftone);
+          baseContext.putImageData(imageData, 0, 0);
+        }
+      }
+
       if (!cancelled) {
         baseRef.current = base;
         setBaseVersion((version) => version + 1);
@@ -58,7 +71,7 @@ export function ArtImage({ element, shading }: { element: DesignElement; shading
     return () => {
       cancelled = true;
     };
-  }, [element.image, layers, useCanvas]);
+  }, [element.image, layers, halftone, useCanvas]);
 
   const x = normalizePosition(element.x);
   const y = normalizePosition(element.y);
@@ -80,7 +93,8 @@ export function ArtImage({ element, shading }: { element: DesignElement; shading
 
     const boxWidth = Math.max(40, (element.naturalWidth * element.scale * 0.45 * shading.contentWidth) / 760);
     const boxHeight = Math.max(40, (element.naturalHeight * element.scale * 0.45 * shading.contentWidth) / 760);
-    const ratio = Math.min(1, SHADED_ART_MAX_SIZE / Math.max(base.width, base.height));
+    const maxSize = halftone ? HALFTONE_ART_MAX_SIZE : SHADED_ART_MAX_SIZE;
+    const ratio = Math.min(1, maxSize / Math.max(base.width, base.height));
     const width = Math.max(1, Math.round(base.width * ratio));
     const height = Math.max(1, Math.round((width * boxHeight) / boxWidth));
 
@@ -106,7 +120,7 @@ export function ArtImage({ element, shading }: { element: DesignElement; shading
       contentHeight: shading.contentHeight,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseVersion, useCanvas, shading?.relief, shading?.strength, shading?.contentWidth, shading?.contentHeight, x, y, element.scale, element.rotation, element.naturalWidth, element.naturalHeight]);
+  }, [baseVersion, useCanvas, halftone, shading?.relief, shading?.strength, shading?.contentWidth, shading?.contentHeight, x, y, element.scale, element.rotation, element.naturalWidth, element.naturalHeight]);
 
   if (!useCanvas) {
     return <img src={element.image} alt={element.name} draggable={false} />;

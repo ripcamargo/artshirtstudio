@@ -1,13 +1,14 @@
 import { Eye, EyeOff, Maximize2, RotateCcw, Undo2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { ColorLayer, DesignElement } from '../types/editor';
+import type { ColorLayer, DesignElement, HalftoneSettings } from '../types/editor';
 import { addStroke, refineEdges, removeColorAt, removeSolidBackground } from '../utils/backgroundRemoval';
 import { eraseStroke } from '../utils/canvasRenderer';
 import { detectColors, hasActiveColorLayers, toHex } from '../utils/colorLayers';
+import { defaultHalftone } from '../utils/halftone';
 import { artBoxSize, normalizePosition, pointerToArtPixel } from '../utils/geometry';
 import { ArtImage, type FabricShading } from './ArtImage';
 
-export type StudioTab = 'colors' | 'background' | 'erase' | 'edges';
+export type StudioTab = 'colors' | 'background' | 'erase' | 'edges' | 'halftone';
 
 /** O que a janela altera na arte; tudo é aplicado de uma vez no OK. */
 export interface ArtDraft {
@@ -15,6 +16,7 @@ export interface ArtDraft {
   naturalWidth: number;
   naturalHeight: number;
   colorLayers?: ColorLayer[];
+  halftone?: HalftoneSettings;
 }
 
 type Backdrop = 'shirt' | 'light' | 'dark' | 'checker';
@@ -24,6 +26,7 @@ const TABS: Array<{ id: StudioTab; label: string }> = [
   { id: 'background', label: 'Fundo' },
   { id: 'erase', label: 'Apagar' },
   { id: 'edges', label: 'Bordas' },
+  { id: 'halftone', label: 'Halftone' },
 ];
 
 const BACKDROPS: Array<{ id: Backdrop; label: string }> = [
@@ -70,6 +73,7 @@ export function ArtStudioModal({
     naturalWidth: element.naturalWidth,
     naturalHeight: element.naturalHeight,
     colorLayers: element.colorLayers,
+    halftone: element.halftone,
   });
   const draftRef = useRef(draft);
   const [tab, setTab] = useState<StudioTab>(initialTab);
@@ -154,6 +158,17 @@ export function ArtStudioModal({
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Altera as configurações de halftone do rascunho (liga o efeito se ainda não existia). */
+  const updateHalftone = (patch: Partial<HalftoneSettings>, recordStep = false) => {
+    if (recordStep) {
+      record();
+    }
+
+    const current = draftRef.current;
+    const base = current.halftone ?? defaultHalftone(current.naturalWidth, current.naturalHeight);
+    commit({ ...current, halftone: { ...base, ...patch } });
   };
 
   const runDetection = async () => {
@@ -414,6 +429,7 @@ export function ArtStudioModal({
     naturalWidth: draft.naturalWidth,
     naturalHeight: draft.naturalHeight,
     colorLayers: draft.colorLayers,
+    halftone: draft.halftone,
   };
   const layers = draft.colorLayers ?? [];
   const changed = hasActiveColorLayers(layers);
@@ -679,6 +695,167 @@ export function ArtStudioModal({
                   Arraste sobre a arte para apagar. O pincel tem sempre o mesmo tamanho na tela, com qualquer zoom.
                   Use [ e ] para ajustar o tamanho e mantenha Espaço pressionado (ou o botão do meio) para mover a visualização.
                 </p>
+              </div>
+            )}
+
+            {tab === 'halftone' && (
+              <div className="studio-section">
+                <label className="studio-check">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.halftone?.enabled)}
+                    onChange={(event) => {
+                      record();
+                      const current = draftRef.current;
+                      const base = current.halftone ?? defaultHalftone(current.naturalWidth, current.naturalHeight);
+                      commit({ ...current, halftone: { ...base, enabled: event.target.checked } });
+                    }}
+                  />
+                  <span>Aplicar halftone nesta arte</span>
+                </label>
+
+                {draft.halftone && (
+                  <>
+                    <div className="studio-modes" role="radiogroup" aria-label="Modo do halftone">
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={draft.halftone.mode === 'transparency'}
+                        className={draft.halftone.mode === 'transparency' ? 'active' : ''}
+                        onClick={() => updateHalftone({ mode: 'transparency' }, true)}
+                      >
+                        Transparência
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={draft.halftone.mode === 'colors'}
+                        className={draft.halftone.mode === 'colors' ? 'active' : ''}
+                        onClick={() => updateHalftone({ mode: 'colors' }, true)}
+                      >
+                        Cores
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={draft.halftone.mode === 'tones'}
+                        className={draft.halftone.mode === 'tones' ? 'active' : ''}
+                        onClick={() => updateHalftone({ mode: 'tones' }, true)}
+                      >
+                        Tons (uma cor)
+                      </button>
+                    </div>
+                    <p className="panel-hint">
+                      {draft.halftone.mode === 'transparency'
+                        ? 'Só afeta áreas semitransparentes (degradês de transparência, sombras e bordas suaves); o resto fica intacto. Se a arte não tem nenhuma, nada muda: use Cores ou Tons.'
+                        : draft.halftone.mode === 'colors'
+                          ? 'A luminosidade vira o tamanho do ponto e as cores originais são mantidas.'
+                          : 'A luminosidade vira o tamanho do ponto e a arte inteira passa a ser de uma só cor de tinta.'}
+                    </p>
+
+                    <label className="studio-slider">
+                      <span>Tamanho da célula</span>
+                      <input
+                        type="range"
+                        min="2"
+                        max={Math.max(40, Math.round(Math.max(draft.naturalWidth, draft.naturalHeight) / 20))}
+                        step="1"
+                        value={draft.halftone.cell}
+                        onPointerDown={record}
+                        onKeyDown={record}
+                        onChange={(event) => updateHalftone({ cell: Number(event.target.value) })}
+                        onDoubleClick={() => {
+                          record();
+                          updateHalftone({ cell: defaultHalftone(draft.naturalWidth, draft.naturalHeight).cell });
+                        }}
+                      />
+                      <strong>{draft.halftone.cell}px</strong>
+                    </label>
+                    <label className="studio-slider">
+                      <span>Ângulo</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="90"
+                        step="1"
+                        value={draft.halftone.angle}
+                        onPointerDown={record}
+                        onKeyDown={record}
+                        onChange={(event) => updateHalftone({ angle: Number(event.target.value) })}
+                        onDoubleClick={() => {
+                          record();
+                          updateHalftone({ angle: 45 });
+                        }}
+                      />
+                      <strong>{draft.halftone.angle}°</strong>
+                    </label>
+                    <label className="studio-slider">
+                      <span>Contraste</span>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="2"
+                        step="0.05"
+                        value={draft.halftone.contrast}
+                        onPointerDown={record}
+                        onKeyDown={record}
+                        onChange={(event) => updateHalftone({ contrast: Number(event.target.value) })}
+                        onDoubleClick={() => {
+                          record();
+                          updateHalftone({ contrast: 1 });
+                        }}
+                      />
+                      <strong>{draft.halftone.contrast.toFixed(2)}</strong>
+                    </label>
+
+                    <div className="studio-modes" role="radiogroup" aria-label="Formato do ponto">
+                      {(
+                        [
+                          ['circle', 'Círculo'],
+                          ['square', 'Quadrado'],
+                          ['diamond', 'Losango'],
+                        ] as const
+                      ).map(([shape, label]) => (
+                        <button
+                          key={shape}
+                          type="button"
+                          role="radio"
+                          aria-checked={draft.halftone?.shape === shape}
+                          className={draft.halftone?.shape === shape ? 'active' : ''}
+                          onClick={() => updateHalftone({ shape }, true)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {draft.halftone.mode !== 'transparency' && (
+                      <label className="studio-check">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(draft.halftone.invert)}
+                          onChange={(event) => updateHalftone({ invert: event.target.checked }, true)}
+                        />
+                        <span>Pontos maiores nas áreas claras (para camisetas escuras)</span>
+                      </label>
+                    )}
+
+                    {draft.halftone.mode === 'tones' && (
+                      <label className="studio-ink">
+                        <span>Cor da tinta</span>
+                        <input
+                          type="color"
+                          value={draft.halftone.ink}
+                          onClick={record}
+                          onChange={(event) => updateHalftone({ ink: event.target.value })}
+                        />
+                      </label>
+                    )}
+                    <p className="panel-hint">
+                      O tamanho da célula é em pixels da imagem original. Ele vale também para a arte baixada. Dê zoom na arte para conferir os pontos.
+                    </p>
+                  </>
+                )}
               </div>
             )}
 

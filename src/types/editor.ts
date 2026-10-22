@@ -15,6 +15,27 @@ export interface ColorLayer {
   replacement?: RGB;
 }
 
+export interface HalftoneSettings {
+  enabled: boolean;
+  /**
+   * transparency: só degradês/semitransparências viram pontos;
+   * colors: a luminosidade vira o tamanho do ponto e as cores originais são mantidas;
+   * tones: a luminosidade vira o tamanho do ponto e tudo passa a ser uma cor de tinta.
+   */
+  mode: 'transparency' | 'colors' | 'tones';
+  /** Tamanho da célula da retícula, em px da imagem original da arte. */
+  cell: number;
+  /** Ângulo da retícula em graus. */
+  angle: number;
+  shape: 'circle' | 'square' | 'diamond';
+  /** 0.5 .. 2 (1 = sem alteração). */
+  contrast: number;
+  /** Cor da tinta no modo tones (#rrggbb). */
+  ink: string;
+  /** Nos modos colors/tones: pontos maiores nas áreas claras em vez das escuras (útil em camisetas escuras). */
+  invert?: boolean;
+}
+
 export interface DesignElement {
   id: string;
   name: string;
@@ -27,6 +48,7 @@ export interface DesignElement {
   /** -100 (preto e branco) .. 0 (original) .. 100 (saturação máxima) */
   saturation?: number;
   colorLayers?: ColorLayer[];
+  halftone?: HalftoneSettings;
   visible: boolean;
   naturalWidth: number;
   naturalHeight: number;

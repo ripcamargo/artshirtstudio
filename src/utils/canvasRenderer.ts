@@ -1,5 +1,6 @@
 import type { DesignElement } from '../types/editor';
 import { hasActiveColorLayers, renderColorLayers } from './colorLayers';
+import { applyHalftone } from './halftone';
 import { getFabricRelief, shadeArtWithFabric } from './fabricShading';
 
 import { MIN_ART_SIZE, REFERENCE_SHIRT_WIDTH, normalizePosition } from './geometry';
@@ -21,7 +22,8 @@ async function prepareElementImage(element: DesignElement): Promise<HTMLCanvasEl
   const image = await loadImage(element.image);
   const factor = saturationToFactor(element.saturation);
   const colorLayers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
-  if (factor === 1 && !colorLayers) {
+  const halftone = element.halftone?.enabled ? element.halftone : null;
+  if (factor === 1 && !colorLayers && !halftone) {
     return image;
   }
 
@@ -41,6 +43,9 @@ async function prepareElementImage(element: DesignElement): Promise<HTMLCanvasEl
     imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   }
   if (factor === 1) {
+    if (halftone) {
+      applyHalftone(imageData, halftone);
+    }
     ctx.putImageData(imageData, 0, 0);
     return canvas;
   }
@@ -63,6 +68,9 @@ async function prepareElementImage(element: DesignElement): Promise<HTMLCanvasEl
     data[i + 2] = m[6] * r + m[7] * g + m[8] * b;
   }
 
+  if (halftone) {
+    applyHalftone(imageData, halftone);
+  }
   ctx.putImageData(imageData, 0, 0);
   return canvas;
 }

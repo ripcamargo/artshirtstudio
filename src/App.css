@@ -1275,7 +1275,7 @@
 /* Abas e blocos da janela de foco. */
 .studio-tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 4px;
   padding: 4px;
   border: 1px solid rgba(142, 152, 180, 0.2);
@@ -1382,4 +1382,52 @@
 
 .color-modal-stage .eraser-cursor {
   pointer-events: none;
+}
+
+.color-modal-panel .studio-tabs button {
+  font-size: 0.72rem;
+}
+
+.studio-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #edf1ff;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.studio-modes {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+}
+
+.color-modal-panel .studio-modes button {
+  padding: 0.5rem 0.3rem;
+  font-size: 0.75rem;
+}
+
+.color-modal-panel .studio-modes button.active {
+  background: linear-gradient(135deg, #7a5cff 0%, #43d1ff 100%);
+  border-color: transparent;
+  color: #fff;
+}
+
+.studio-ink {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #dde4fa;
+  font-size: 0.8rem;
+}
+
+.studio-ink input[type='color'] {
+  width: 44px;
+  padding: 2px;
+  border: 1px solid rgba(153, 164, 196, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
 }
