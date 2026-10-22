@@ -1,21 +1,13 @@
 .app-shell {
   max-width: 1500px;
   margin: 0 auto;
-  padding: 28px 18px 48px;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 20px;
+  padding: 12px 18px 16px;
 }
 
 .brand-logo {
   display: block;
-  width: min(300px, 70vw);
-  max-height: 68px;
+  width: min(200px, 60vw);
+  max-height: 46px;
   object-fit: contain;
   object-position: left center;
 }
@@ -67,6 +59,7 @@
 .segmented-control button,
 .mockup-switcher button,
 .tool-switch button,
+.export-trigger,
 .row-buttons button,
 .list-header button,
 .primary-action,
@@ -83,6 +76,8 @@
 
 .segmented-control button.active,
 .tool-switch button.active,
+.export-trigger:hover,
+.export-trigger[aria-expanded='true'],
 .controls-panel button:hover,
 .primary-action:hover,
 .upload-button:hover,
@@ -93,16 +88,100 @@
   color: #fff;
 }
 
-.mockup-switcher {
+.editor-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+}
+
+/* Barra vertical à esquerda do palco: ferramentas, lado/cores e exportação. */
+.editor-toolbar {
+  flex: 0 0 80px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  margin-bottom: 16px;
+  gap: 14px;
+}
+
+.editor-toolbar .tool-switch {
+  grid-template-columns: 48px;
+}
+
+.mockup-switcher {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding-top: 14px;
+  border-top: 1px solid rgba(142, 152, 180, 0.14);
+}
+
+.mockup-switcher .segmented-control {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.mockup-switcher .segmented-control button {
+  padding: 0.5rem 0;
+  font-size: 0.74rem;
+}
+
+.mockup-switcher > button {
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.mockup-switcher .color-swatch {
+  width: 28px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.history-switch {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.mockup-switcher .history-switch button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 7px;
+}
+
+.history-switch button svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.8;
+}
+
+.history-switch button:disabled {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+
+.history-switch button:hover {
+  background: linear-gradient(135deg, #7a5cff 0%, #43d1ff 100%);
+  border-color: transparent;
+  color: #fff;
 }
 
 .mockup-switcher > button {
   display: block;
-  padding: 3px;
+  padding: 2px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
 }
 
@@ -131,31 +210,52 @@
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
 }
 
-.mockup-switcher .upload-box {
-  margin-left: auto;
-  flex: 0 0 auto;
+.add-image-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
 }
 
-.mockup-switcher .upload-button {
-  width: auto;
-  white-space: nowrap;
+.add-image-button svg {
+  width: 18px;
+  height: 18px;
 }
 
-.mockup-switcher .export-menu {
-  flex: 0 0 auto;
+.export-dropdown .art-name-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  margin-bottom: 16px;
+  border: 1px solid rgba(153, 164, 196, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  padding: 0 0.85rem;
+  color: #edf1ff;
 }
 
-.mockup-switcher .export-dropdown {
-  top: calc(100% + 10px);
-  bottom: auto;
+.editor-toolbar .export-menu {
+  margin-top: auto;
+}
+
+/* A barra fica à esquerda: o menu abre para a direita, sobre o palco. */
+.editor-toolbar .export-dropdown {
+  right: auto;
+  left: calc(100% + 10px);
+  bottom: 0;
 }
 
 .preview-stage {
   position: relative;
   display: grid;
   place-items: center;
-  width: 100%;
-  min-height: 720px;
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  /* Ocupa a altura da janela (menos topo e margens) para não precisar rolar a página. */
+  height: max(480px, calc(100dvh - 80px));
+  padding: 10px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.04)),
     rgba(12, 14, 18, 0.88);
@@ -173,13 +273,20 @@
   cursor: grabbing;
 }
 
-/* Camada que recebe o zoom (só visual). Ocupa exatamente a área do palco. */
+/*
+ * Camada que recebe o zoom (só visual). Tem exatamente o tamanho da imagem da camiseta
+ * (928x1141), então as posições das artes (em %) batem com as do PNG exportado.
+ * container-type permite dimensionar as artes em cqw, proporcionais à camiseta.
+ */
 .preview-content {
   position: relative;
   display: grid;
   place-items: center;
-  place-self: stretch;
-  width: 100%;
+  place-self: center;
+  height: 100%;
+  max-width: 100%;
+  aspect-ratio: 928 / 1141;
+  container-type: inline-size;
   transform-origin: center;
 }
 
@@ -257,9 +364,8 @@
 
 .mockup-base {
   display: block;
-  width: min(80%, 760px);
-  height: auto;
-  max-height: 82vh;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   border-radius: 18px;
   box-shadow: 0 30px 45px rgba(0, 0, 0, 0.22);
@@ -312,9 +418,42 @@
 .removal-controls label {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
   color: #dde4fa;
   font-size: 0.8rem;
+}
+
+.controls-list input[type='range'],
+.eraser-controls input[type='range'],
+.removal-controls input[type='range'] {
+  margin: 0;
+}
+
+/* Label em cima; slider e valor (cinza, discreto) na linha de baixo, valor à direita do slider. */
+.controls-list label:has(> input[type='range']),
+.eraser-controls label:has(> input[type='range']),
+.removal-controls label:has(> input[type='range']) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
+}
+
+.controls-list label:has(> input[type='range']) > span,
+.eraser-controls label:has(> input[type='range']) > span,
+.removal-controls label:has(> input[type='range']) > span {
+  grid-column: 1 / -1;
+}
+
+.controls-list label > input[type='range'] + strong,
+.eraser-controls label > input[type='range'] + strong,
+.removal-controls label > input[type='range'] + strong {
+  min-width: 2.6em;
+  color: rgba(174, 184, 205, 0.6);
+  font-size: 0.72rem;
+  font-weight: 400;
+  text-align: right;
 }
 
 .field input,
@@ -350,9 +489,8 @@
 
 .tool-switch {
   display: grid;
-  grid-template-columns: repeat(3, 48px) 1fr repeat(2, 48px);
+  grid-template-columns: repeat(3, 48px);
 }
-
 .tool-switch button:disabled {
   opacity: 0.35;
   cursor: default;
@@ -678,10 +816,6 @@
   .workspace {
     grid-template-columns: 1fr;
   }
-
-  .preview-stage {
-    min-height: 520px;
-  }
 }
 
 .panel-hint {
@@ -751,11 +885,26 @@
 }
 
 .color-layer-swatch {
+  position: relative;
+  display: block;
+  cursor: pointer;
   width: 26px;
   height: 26px;
   border: 1px solid rgba(237, 241, 255, 0.3);
   border-radius: 7px;
   background-image: none;
+}
+
+.color-layer-swatch input[type='color'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .color-layer-list li.hidden-color .color-layer-swatch {
@@ -767,4 +916,60 @@
     #ff8585 55%,
     transparent 55%
   );
+}
+
+.stroke-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.stroke-actions button {
+  flex: 1;
+}
+
+.controls-panel .stroke-actions input.stroke-color {
+  flex: 0 0 44px;
+  width: 44px;
+  height: auto;
+  padding: 2px;
+  cursor: pointer;
+}
+
+/* Seções recolhíveis (Cores da arte, Traçado) no painel da Seta. */
+.panel-section {
+  border-top: 1px solid rgba(142, 152, 180, 0.14);
+  padding-top: 10px;
+}
+
+.panel-section > summary {
+  cursor: pointer;
+  color: #dde4fa;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  user-select: none;
+}
+
+.panel-section[open] > summary {
+  margin-bottom: 12px;
+}
+
+.panel-section .section-body,
+.panel-section .color-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.color-layers-actions {
+  justify-content: flex-end;
+  margin-bottom: 0;
+}
+
+.color-layers-actions:empty {
+  display: none;
+}
+
+.saturation-row {
+  margin-bottom: 12px;
 }

@@ -28,12 +28,30 @@ const sartorialFiles: Record<MockupId, { name: string; swatch: string; front: st
   wine: {
     name: 'Vermelho',
     swatch: '#8b2638',
-    front: '/camisetas/5.%20Vermelho_Frente.png',
+    front: '/camisetas/5.%20Vermelho_Frente.jpg',
     back: '/camisetas/5.%20Vermelho_Costas.png',
+  },
+  yellow: {
+    name: 'Amarela',
+    swatch: '#e8b702',
+    front: '/camisetas/6.%20Amarelo_Frente.jpg',
+    back: '/camisetas/6.%20Amarelo_Costas.jpg',
+  },
+  purple: {
+    name: 'Roxa',
+    swatch: '#54295e',
+    front: '/camisetas/7.%20Roxo_Frente.jpg',
+    back: '/camisetas/7.%20Roxo_Costas.jpg',
+  },
+  brown: {
+    name: 'Marrom',
+    swatch: '#4d3239',
+    front: '/camisetas/8.Marrom_Frente.jpg',
+    back: '/camisetas/8.Marrom_Costas.jpg',
   },
 };
 
-export const MOCKUPS: MockupDefinition[] = (['black', 'white', 'wine', 'gray', 'navy'] as MockupId[]).map((id) => ({
+export const MOCKUPS: MockupDefinition[] = (['black', 'white', 'wine', 'gray', 'navy', 'yellow', 'purple', 'brown'] as MockupId[]).map((id) => ({
   id,
   name: sartorialFiles[id].name,
   swatch: sartorialFiles[id].swatch,

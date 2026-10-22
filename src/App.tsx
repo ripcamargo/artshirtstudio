@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Plus, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { MOCKUP_BY_ID, MOCKUPS } from './config/mockups';
-import { removeColorAt, removeSolidBackground } from './utils/backgroundRemoval';
+import { addStroke, refineEdges, removeColorAt, removeSolidBackground } from './utils/backgroundRemoval';
 import { detectColors, hasActiveColorLayers, renderColorLayers, toHex } from './utils/colorLayers';
 import { applyEraserToImage, loadImage, renderMockupComposition, saturationToFactor } from './utils/canvasRenderer';
 import { exportZip } from './utils/zipExporter';
@@ -59,6 +59,13 @@ function clampPan(pan: { x: number; y: number }, zoom: number, stage: HTMLElemen
 function sameArtwork(a: AppState, b: AppState) {
   return a.front.elements === b.front.elements && a.back.elements === b.back.elements;
 }
+
+const ARROW_DIRECTIONS: Record<string, { x: number; y: number }> = {
+  ArrowLeft: { x: -1, y: 0 },
+  ArrowRight: { x: 1, y: 0 },
+  ArrowUp: { x: 0, y: -1 },
+  ArrowDown: { x: 0, y: 1 },
+};
 
 function isTextField(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
@@ -195,14 +202,18 @@ function App() {
   const [toolMode, setToolMode] = useState<ToolMode>('select');
   const [eraserSize, setEraserSize] = useState(26);
   const [tolerance, setTolerance] = useState(28);
+  const [edgeRadius, setEdgeRadius] = useState(1);
+  const [strokeWidth, setStrokeWidth] = useState(1);
+  const [strokeColor, setStrokeColor] = useState('#ffffff');
   const [colorCount, setColorCount] = useState(8);
   const [detectingColors, setDetectingColors] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [status, setStatus] = useState('Pronto');
-  const [selectedColors, setSelectedColors] = useState<MockupId[]>(['black', 'white', 'wine', 'gray', 'navy']);
+  const [selectedColors, setSelectedColors] = useState<MockupId[]>(MOCKUPS.map((mockup) => mockup.id));
   const [selectedSides, setSelectedSides] = useState<Side[]>(['front', 'back']);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
   const [eraserCursor, setEraserCursor] = useState({ x: 0, y: 0, visible: false });
   const previewRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -298,13 +309,129 @@ function App() {
     redoRef.current = redo;
   });
 
+  // Ações dos atalhos de teclado; atualizada a cada render para o listener (registrado uma vez) não ficar com estado velho.
+  const keyboardActionsRef = useRef<{
+    nudgeSelected: (dx: number, dy: number, fast: boolean, repeat: boolean) => boolean;
+    resizeTool: (direction: 1 | -1) => void;
+  }>({
+    nudgeSelected: () => false,
+    resizeTool: () => {},
+  });
+  useEffect(() => {
+    keyboardActionsRef.current = {
+      // Move a arte selecionada em pixels da camiseta (Shift = 10px). Devolve se tratou a tecla.
+      nudgeSelected: (dx, dy, fast, repeat) => {
+        const current = stateRef.current;
+        const selectedId = current[current.activeSide].selectedId;
+        const content = contentRef.current;
+        if (toolMode !== 'select' || !selectedId || !content || !content.offsetWidth || !content.offsetHeight) {
+          return false;
+        }
+
+        if (!repeat) {
+          checkpoint();
+        }
+
+        const step = fast ? 10 : 1;
+        const clamp = (value: number) => Math.max(0, Math.min(1, value));
+        setState((latest) => {
+          const side = latest[latest.activeSide];
+          return {
+            ...latest,
+            [latest.activeSide]: {
+              ...side,
+              elements: side.elements.map((element) =>
+                element.id === selectedId
+                  ? {
+                      ...element,
+                      x: clamp(normalizePosition(element.x) + (dx * step) / content.offsetWidth),
+                      y: clamp(normalizePosition(element.y) + (dy * step) / content.offsetHeight),
+                    }
+                  : element,
+              ),
+            },
+          };
+        });
+        return true;
+      },
+      // "[" diminui e "]" aumenta o tamanho da ferramenta ativa (hoje, a borracha).
+      resizeTool: (direction) => {
+        if (toolMode === 'eraser') {
+          setEraserSize((size) => Math.max(8, Math.min(120, size + direction * 4)));
+        }
+      },
+    };
+  });
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || isTextField(event.target)) {
+      if (isTextField(event.target)) {
+        return;
+      }
+
+      // "[" e "]" podem exigir AltGr (Ctrl+Alt no Windows) em teclados ABNT2, por isso vêm antes do filtro de Alt.
+      // Usa o caractere (event.key), não a tecla física: no ABNT2 o código de "[" é BracketRight.
+      const isBracketLeft = event.key === '[';
+      const isBracketRight = event.key === ']';
+      if ((isBracketLeft || isBracketRight) && !((event.ctrlKey || event.metaKey) && !event.altKey)) {
+        event.preventDefault();
+        keyboardActionsRef.current.resizeTool(isBracketRight ? 1 : -1);
+        return;
+      }
+
+      if (event.altKey) {
         return;
       }
 
       const key = event.key.toLowerCase();
+
+      const arrow = ARROW_DIRECTIONS[event.key];
+      if (arrow && !(event.ctrlKey || event.metaKey)) {
+        // Num slider focado, as setas já ajustam o próprio slider.
+        if (event.target instanceof HTMLInputElement && event.target.type === 'range') {
+          return;
+        }
+
+        if (keyboardActionsRef.current.nudgeSelected(arrow.x, arrow.y, event.shiftKey, event.repeat)) {
+          event.preventDefault();
+        }
+        return;
+      }
+
+      if (key === 'delete') {
+        const snapshot = stateRef.current;
+        const selectedId = snapshot[snapshot.activeSide].selectedId;
+        if (selectedId) {
+          event.preventDefault();
+          deleteElementRef.current(selectedId);
+        }
+        return;
+      }
+
+      if (!(event.ctrlKey || event.metaKey)) {
+        if (event.shiftKey || event.repeat) {
+          return;
+        }
+        if (key === 'v') {
+          setToolMode('select');
+        } else if (key === 'e') {
+          setToolMode('eraser');
+        } else if (key === 'w') {
+          setToolMode('remove-bg');
+        } else if (key === 'f') {
+          setState((current) => ({ ...current, activeSide: 'front' }));
+        } else if (key === 'c') {
+          setState((current) => ({ ...current, activeSide: 'back' }));
+        } else if (/^Digit[1-9]$/.test(event.code)) {
+          // Teclas numéricas do topo: 1, 2, 3... na ordem das cores da barra.
+          const mockup = MOCKUPS[Number(event.code.slice(5)) - 1];
+          if (mockup) {
+            setState((current) => ({ ...current, activeColor: mockup.id }));
+          }
+        }
+        return;
+      }
+
       if (key === 'z' && !event.shiftKey) {
         event.preventDefault();
         undoRef.current();
@@ -397,6 +524,7 @@ function App() {
       const updated = [...side.elements, ...entries];
       return {
         ...current,
+        productName: '',
         [current.activeSide]: {
           ...side,
           elements: updated,
@@ -469,6 +597,11 @@ function App() {
     setStatus('Elemento removido');
   };
 
+  const deleteElementRef = useRef(handleDeleteElement);
+  useEffect(() => {
+    deleteElementRef.current = handleDeleteElement;
+  });
+
   const handleToggleVisibility = (elementId: string) => {
     checkpoint();
     updateCurrentSide((current) => {
@@ -501,8 +634,9 @@ function App() {
     } = toStagePoint(contentRef.current, event.clientX, event.clientY);
     const centerX = normalizePosition(element.x) * stageWidth;
     const centerY = normalizePosition(element.y) * stageHeight;
-    const displayWidth = Math.max(40, element.naturalWidth * element.scale * 0.45);
-    const displayHeight = Math.max(40, element.naturalHeight * element.scale * 0.45);
+    // Mesmo tamanho exibido na tela (ver cqw no render): proporcional à largura da camiseta.
+    const displayWidth = Math.max(40, (element.naturalWidth * element.scale * 0.45 * stageWidth) / 760);
+    const displayHeight = Math.max(40, (element.naturalHeight * element.scale * 0.45 * stageWidth) / 760);
     const imageScale = Math.min(
       displayWidth / element.naturalWidth,
       displayHeight / element.naturalHeight,
@@ -586,6 +720,64 @@ function App() {
     }
   };
 
+  const handleRefineEdges = async () => {
+    if (!selectedElement) {
+      return;
+    }
+
+    try {
+      const refined = await refineEdges(selectedElement.image, edgeRadius);
+      checkpoint();
+      updateCurrentSide((current) => {
+        const side = current[current.activeSide];
+        const updated = side.elements.map((element) =>
+          element.id === selectedElement.id ? { ...element, image: refined } : element,
+        );
+
+        return {
+          ...current,
+          [current.activeSide]: {
+            ...side,
+            elements: updated,
+          },
+        };
+      });
+      setStatus(`Arestas refinadas (${edgeRadius}px)`);
+    } catch {
+      setStatus('Não foi possível refinar as arestas');
+    }
+  };
+
+  const handleAddStroke = async () => {
+    if (!selectedElement) {
+      return;
+    }
+
+    try {
+      const stroked = await addStroke(selectedElement.image, strokeWidth, strokeColor);
+      checkpoint();
+      updateCurrentSide((current) => {
+        const side = current[current.activeSide];
+        const updated = side.elements.map((element) =>
+          element.id === selectedElement.id
+            ? { ...element, image: stroked.image, naturalWidth: stroked.width, naturalHeight: stroked.height }
+            : element,
+        );
+
+        return {
+          ...current,
+          [current.activeSide]: {
+            ...side,
+            elements: updated,
+          },
+        };
+      });
+      setStatus(`Traçado de ${strokeWidth}px adicionado`);
+    } catch {
+      setStatus('Não foi possível adicionar o traçado');
+    }
+  };
+
   const handleRemoveColorAtPoint = async (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
     if (!element.visible) {
       return;
@@ -661,7 +853,10 @@ function App() {
 
     checkpoint();
     updateSelectedElement({
-      colorLayers: selectedElement.colorLayers.map((layer) => ({ ...layer, level: 1 })),
+      colorLayers: selectedElement.colorLayers.map(({ replacement: _replacement, ...layer }) => ({
+        ...layer,
+        level: 1,
+      })),
     });
   };
 
@@ -682,6 +877,11 @@ function App() {
   };
 
   const handleExportAll = async () => {
+    if (!state.productName.trim()) {
+      setStatus('Preencha o nome da arte para exportar');
+      return;
+    }
+
     if (selectedColors.length === 0) {
       setStatus('Selecione pelo menos uma cor');
       return;
@@ -741,6 +941,17 @@ function App() {
       return;
     }
 
+    // Guarda a distância entre o clique e o centro da arte, para ela não "pular" para o ponteiro ao arrastar.
+    if (contentRef.current) {
+      const point = toStagePoint(contentRef.current, event.clientX, event.clientY);
+      dragOffsetRef.current = {
+        x: normalizePosition(element.x) - point.x / point.width,
+        y: normalizePosition(element.y) - point.y / point.height,
+      };
+    } else {
+      dragOffsetRef.current = { x: 0, y: 0 };
+    }
+
     setDraggingId(element.id);
     handleSelectElement(element.id);
   };
@@ -758,8 +969,8 @@ function App() {
     }
 
     const point = toStagePoint(contentRef.current, event.clientX, event.clientY);
-    const x = point.x / point.width;
-    const y = point.y / point.height;
+    const x = point.x / point.width + dragOffsetRef.current.x;
+    const y = point.y / point.height + dragOffsetRef.current.y;
 
     updateSelectedElement({ x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) });
   };
@@ -784,14 +995,26 @@ function App() {
     setPan({ x: 0, y: 0 });
   };
 
-  // Com zoom, a roda do mouse navega pela imagem em vez de rolar a página.
+  // Ctrl + roda dá zoom; sem Ctrl, com zoom, a roda navega pela imagem em vez de rolar a página.
   useEffect(() => {
     const stage = previewRef.current;
-    if (!stage || zoom === 1) {
+    if (!stage) {
       return;
     }
 
     const handleWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        if (event.deltaY !== 0) {
+          changeZoom(event.deltaY < 0 ? 1 : -1);
+        }
+        return;
+      }
+
+      if (zoom === 1) {
+        return;
+      }
+
       event.preventDefault();
       const dx = event.shiftKey ? event.deltaY : event.deltaX;
       const dy = event.shiftKey ? 0 : event.deltaY;
@@ -800,6 +1023,7 @@ function App() {
 
     stage.addEventListener('wheel', handleWheel, { passive: false });
     return () => stage.removeEventListener('wheel', handleWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom]);
 
   // Arrastar uma área vazia do palco (com zoom) move a visualização.
@@ -844,23 +1068,49 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <img
-          className="brand-logo"
-          src="/logo%20artshirt%20studio.png"
-          alt="Artshirt Studio"
-        />
-        <div className="status-announcer" role="status" aria-live="polite">
-          {status}
-        </div>
-      </header>
+      <div className="status-announcer" role="status" aria-live="polite">
+        {status}
+      </div>
 
       <main className="workspace">
         <section className="preview-panel panel">
-          <div className="preview-header">
+          <div className="editor-layout">
+          <div className="editor-toolbar">
+            <div className="tool-switch" aria-label="Ferramentas do editor">
+              <button
+                type="button"
+                title="Mover (V)"
+                aria-label="Seta de seleção"
+                className={toolMode === 'select' ? 'active' : ''}
+                onClick={() => setToolMode('select')}
+              >
+                <MousePointer2 aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title="Borracha (E)"
+                aria-label="Borracha"
+                className={toolMode === 'eraser' ? 'active' : ''}
+                onClick={() => setToolMode('eraser')}
+              >
+                <Eraser aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title="Remover fundo (W)"
+                aria-label="Varinha para remover fundo"
+                className={toolMode === 'remove-bg' ? 'active' : ''}
+                onClick={() => setToolMode('remove-bg')}
+              >
+                <WandSparkles aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="mockup-switcher" aria-label="Lado e cores do mockup">
             <div className="segmented-control">
               <button
                 type="button"
+                title="Frente (F)"
                 className={state.activeSide === 'front' ? 'active' : ''}
                 onClick={() => handleSelectSide('front')}
               >
@@ -868,21 +1118,19 @@ function App() {
               </button>
               <button
                 type="button"
+                title="Costas (C)"
                 className={state.activeSide === 'back' ? 'active' : ''}
                 onClick={() => handleSelectSide('back')}
               >
                 Costas
               </button>
             </div>
-          </div>
-
-          <div className="mockup-switcher" aria-label="Cores do mockup">
-            {MOCKUPS.map((mockup) => (
+            {MOCKUPS.map((mockup, index) => (
               <button
                 key={mockup.id}
                 type="button"
                 className={state.activeColor === mockup.id ? 'active' : ''}
-                title={mockup.name}
+                title={`${mockup.name} (${index + 1})`}
                 aria-label={mockup.name}
                 onClick={() => setState((current) => ({ ...current, activeColor: mockup.id }))}
               >
@@ -893,24 +1141,42 @@ function App() {
                 />
               </button>
             ))}
-            <div className="upload-box">
-              <label htmlFor="art-upload" className="upload-button">
-                + Adicionar imagem
-              </label>
-              <input
-                id="art-upload"
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(event) => {
-                  void handleAddImages(event.target.files);
-                  event.target.value = '';
-                }}
-              />
+            <div className="history-switch" aria-label="Histórico">
+              <button
+                type="button"
+                title="Desfazer (Ctrl+Z)"
+                aria-label="Desfazer"
+                disabled={historyCounts.past === 0}
+                onClick={undo}
+              >
+                <Undo2 aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title="Refazer (Ctrl+Y)"
+                aria-label="Refazer"
+                disabled={historyCounts.future === 0}
+                onClick={redo}
+              >
+                <Redo2 aria-hidden="true" />
+              </button>
+            </div>
             </div>
             <div className="export-menu" ref={exportMenuRef}>
               {exportMenuOpen && (
                 <div id="export-options" className="export-dropdown" role="dialog" aria-label="Opções de exportação">
+                  <input
+                    className="art-name-input"
+                    aria-label="Nome da arte"
+                    placeholder="Nome da arte"
+                    value={state.productName}
+                    onChange={(event) =>
+                      setState((current) => ({
+                        ...current,
+                        productName: event.target.value,
+                      }))
+                    }
+                  />
                   <div className="export-color-picker">
                     <div className="list-header">
                       <span>Cores para exportar</span>
@@ -967,12 +1233,16 @@ function App() {
                     className="primary-action"
                     type="button"
                     onClick={() => void handleExportAll()}
-                    disabled={exporting || selectedColors.length === 0 || selectedSides.length === 0}
+                    disabled={
+                      exporting || !state.productName.trim() || selectedColors.length === 0 || selectedSides.length === 0
+                    }
                     aria-busy={exporting || undefined}
                   >
                     {exporting
                       ? 'Exportando...'
-                      : selectedColors.length === 0
+                      : !state.productName.trim()
+                        ? 'Preencha o nome da arte'
+                        : selectedColors.length === 0
                         ? 'Selecione uma cor'
                         : selectedSides.length === 0
                           ? 'Selecione um lado'
@@ -1019,8 +1289,10 @@ function App() {
 
             {activeSideState.elements.map((element) => {
               const isSelected = element.id === activeSideState.selectedId;
-              const displayWidth = Math.max(40, element.naturalWidth * element.scale * 0.45);
-              const displayHeight = Math.max(40, element.naturalHeight * element.scale * 0.45);
+              // 0.45 px por px natural numa camiseta de 760px de largura, mantido proporcional (cqw)
+              // para a arte não mudar de tamanho em relação à camiseta quando o palco se ajusta à janela.
+              const displayWidth = `max(40px, ${((element.naturalWidth * element.scale * 0.45) / 760) * 100}cqw)`;
+              const displayHeight = `max(40px, ${((element.naturalHeight * element.scale * 0.45) / 760) * 100}cqw)`;
 
               return (
                 <div
@@ -1029,8 +1301,8 @@ function App() {
                   style={{
                     left: `${normalizePosition(element.x) * 100}%`,
                     top: `${normalizePosition(element.y) * 100}%`,
-                    width: `${displayWidth}px`,
-                    height: `${displayHeight}px`,
+                    width: displayWidth,
+                    height: displayHeight,
                     opacity: element.opacity,
                     filter: element.saturation ? `saturate(${saturationToFactor(element.saturation)})` : undefined,
                     visibility: element.visible ? 'visible' : 'hidden',
@@ -1088,72 +1360,15 @@ function App() {
               </button>
             </div>
           </div>
+          </div>
         </section>
 
         <aside className="controls-panel panel">
-          <div className="field">
-            <label htmlFor="product-name">Nome da arte</label>
-            <input
-              id="product-name"
-              value={state.productName}
-              onChange={(event) =>
-                setState((current) => ({
-                  ...current,
-                  productName: event.target.value,
-                }))
-              }
-            />
-            <small>{`Arquivo: ${toSafeFileName(state.productName)}-mockups.zip`}</small>
-          </div>
-
-          <div className="tool-switch" aria-label="Ferramentas do editor">
-            <button
-              type="button"
-              title="Mover"
-              aria-label="Seta de seleção"
-              className={toolMode === 'select' ? 'active' : ''}
-              onClick={() => setToolMode('select')}
-            >
-              <MousePointer2 aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              title="Borracha"
-              aria-label="Borracha"
-              className={toolMode === 'eraser' ? 'active' : ''}
-              onClick={() => setToolMode('eraser')}
-            >
-              <Eraser aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              title="Remover fundo"
-              aria-label="Varinha para remover fundo"
-              className={toolMode === 'remove-bg' ? 'active' : ''}
-              onClick={() => setToolMode('remove-bg')}
-            >
-              <WandSparkles aria-hidden="true" />
-            </button>
-            <span aria-hidden="true" />
-            <button
-              type="button"
-              title="Desfazer (Ctrl+Z)"
-              aria-label="Desfazer"
-              disabled={historyCounts.past === 0}
-              onClick={undo}
-            >
-              <Undo2 aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              title="Refazer (Ctrl+Y)"
-              aria-label="Refazer"
-              disabled={historyCounts.future === 0}
-              onClick={redo}
-            >
-              <Redo2 aria-hidden="true" />
-            </button>
-          </div>
+          <img
+            className="brand-logo"
+            src="/logo%20artshirt%20studio.png"
+            alt="Artshirt Studio"
+          />
 
           <div className="controls-list">
             {showSelectionControls && (
@@ -1169,6 +1384,10 @@ function App() {
                     onPointerDown={checkpoint}
                     onKeyDown={checkpoint}
                     onChange={(event) => updateSelectedElement({ scale: Number(event.target.value) })}
+                    onDoubleClick={() => {
+                      checkpoint();
+                      updateSelectedElement({ scale: 1 });
+                    }}
                   />
                   <strong>{`${selectedElement.scale.toFixed(2)}x`}</strong>
                 </label>
@@ -1184,6 +1403,10 @@ function App() {
                     onPointerDown={checkpoint}
                     onKeyDown={checkpoint}
                     onChange={(event) => updateSelectedElement({ rotation: Number(event.target.value) })}
+                    onDoubleClick={() => {
+                      checkpoint();
+                      updateSelectedElement({ rotation: 0 });
+                    }}
                   />
                   <strong>{`${selectedElement.rotation.toFixed(0)}°`}</strong>
                 </label>
@@ -1199,62 +1422,43 @@ function App() {
                     onPointerDown={checkpoint}
                     onKeyDown={checkpoint}
                     onChange={(event) => updateSelectedElement({ opacity: Number(event.target.value) })}
+                    onDoubleClick={() => {
+                      checkpoint();
+                      updateSelectedElement({ opacity: 1 });
+                    }}
                   />
                   <strong>{`${Math.round((selectedElement.opacity || 0) * 100)}%`}</strong>
                 </label>
 
-                <label>
-                  <span>Saturação</span>
-                  <input
-                    type="range"
-                    min="-100"
-                    max="100"
-                    step="1"
-                    value={selectedElement.saturation ?? 0}
-                    onPointerDown={checkpoint}
-                    onKeyDown={checkpoint}
-                    onChange={(event) => updateSelectedElement({ saturation: Number(event.target.value) })}
-                    onDoubleClick={() => {
-                      checkpoint();
-                      updateSelectedElement({ saturation: 0 });
-                    }}
-                    title="Duplo clique para voltar ao original"
-                  />
-                  <strong>
-                    {(selectedElement.saturation ?? 0) === 0
-                      ? 'Original'
-                      : `${(selectedElement.saturation ?? 0) > 0 ? '+' : ''}${selectedElement.saturation}`}
-                  </strong>
-                </label>
-
-              </>
-            )}
-
-            {showEraserControls && (
-              <div className="eraser-controls">
-              <label>
-                <span>Tamanho da borracha</span>
-                <input
-                  type="range"
-                  min="8"
-                  max="120"
-                  value={eraserSize}
-                  onChange={(event) => setEraserSize(Number(event.target.value))}
-                />
-                <strong>{eraserSize}px</strong>
-              </label>
-              </div>
-            )}
-
-            {showBackgroundControls && !selectedElement && (
-              <p className="panel-hint">Selecione uma arte para ajustar as cores.</p>
-            )}
-
-            {showBackgroundControls && selectedElement && (
-              <div className="removal-controls">
+                <details className="panel-section">
+                  <summary>Cores da arte</summary>
+                  <div className="section-body saturation-row">
+                    <label>
+                      <span>Saturação</span>
+                      <input
+                        type="range"
+                        min="-100"
+                        max="100"
+                        step="1"
+                        value={selectedElement.saturation ?? 0}
+                        onPointerDown={checkpoint}
+                        onKeyDown={checkpoint}
+                        onChange={(event) => updateSelectedElement({ saturation: Number(event.target.value) })}
+                        onDoubleClick={() => {
+                          checkpoint();
+                          updateSelectedElement({ saturation: 0 });
+                        }}
+                        title="Duplo clique para voltar ao original"
+                      />
+                      <strong>
+                        {(selectedElement.saturation ?? 0) === 0
+                          ? 'Original'
+                          : `${(selectedElement.saturation ?? 0) > 0 ? '+' : ''}${selectedElement.saturation}`}
+                      </strong>
+                    </label>
+                  </div>
               <div className="color-layers">
-                <div className="list-header">
-                  <span>Cores da arte</span>
+                <div className="list-header color-layers-actions">
                   {selectedElement.colorLayers && selectedElement.colorLayers.length > 0 && (
                     <button
                       type="button"
@@ -1278,6 +1482,7 @@ function App() {
                     step="1"
                     value={colorCount}
                     onChange={(event) => setColorCount(Number(event.target.value))}
+                    onDoubleClick={() => setColorCount(8)}
                   />
                   <strong>{`até ${colorCount}`}</strong>
                 </label>
@@ -1301,12 +1506,36 @@ function App() {
 
                       return (
                         <li key={layer.id} className={hidden ? 'hidden-color' : ''}>
-                          <span
+                          <label
                             className="color-layer-swatch"
-                            style={{ backgroundColor: hex }}
-                            title={`${hex.toUpperCase()} · ${(layer.share * 100).toFixed(1)}% da arte`}
-                            aria-hidden="true"
-                          />
+                            style={{ backgroundColor: layer.replacement ? toHex(layer.replacement) : hex }}
+                            title={`${hex.toUpperCase()} · ${(layer.share * 100).toFixed(1)}% da arte. Clique para trocar a cor${
+                              layer.replacement ? '; duplo clique para voltar à original' : ''
+                            }`}
+                            onDoubleClick={() => {
+                              if (layer.replacement) {
+                                checkpoint();
+                                updateColorLayer(layer.id, { replacement: undefined });
+                              }
+                            }}
+                          >
+                            <input
+                              type="color"
+                              aria-label={`Trocar a cor ${hex.toUpperCase()}`}
+                              value={toHex(layer.replacement ?? layer.color)}
+                              onClick={checkpoint}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                updateColorLayer(layer.id, {
+                                  replacement: [
+                                    parseInt(value.slice(1, 3), 16),
+                                    parseInt(value.slice(3, 5), 16),
+                                    parseInt(value.slice(5, 7), 16),
+                                  ],
+                                });
+                              }}
+                            />
+                          </label>
                           <input
                             type="range"
                             min="0"
@@ -1340,7 +1569,66 @@ function App() {
                   </ul>
                 )}
               </div>
+                </details>
 
+                <details className="panel-section">
+                  <summary>Traçado</summary>
+                  <div className="section-body">
+              <label>
+                <span>Traçado</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="20"
+                  step="1"
+                  value={strokeWidth}
+                  onChange={(event) => setStrokeWidth(Number(event.target.value))}
+                  onDoubleClick={() => setStrokeWidth(1)}
+                />
+                <strong>{strokeWidth}px</strong>
+              </label>
+              <div className="stroke-actions">
+                <input
+                  type="color"
+                  className="stroke-color"
+                  title="Cor do traçado"
+                  aria-label="Cor do traçado"
+                  value={strokeColor}
+                  onChange={(event) => setStrokeColor(event.target.value)}
+                />
+                <button type="button" onClick={() => void handleAddStroke()}>
+                  Adicionar traçado
+                </button>
+              </div>
+                  </div>
+                </details>
+
+              </>
+            )}
+
+            {showEraserControls && (
+              <div className="eraser-controls">
+              <label>
+                <span>Tamanho da borracha</span>
+                <input
+                  type="range"
+                  min="8"
+                  max="120"
+                  value={eraserSize}
+                  onChange={(event) => setEraserSize(Number(event.target.value))}
+                  onDoubleClick={() => setEraserSize(26)}
+                />
+                <strong>{eraserSize}px</strong>
+              </label>
+              </div>
+            )}
+
+            {showBackgroundControls && !selectedElement && (
+              <p className="panel-hint">Selecione uma arte para usar a varinha.</p>
+            )}
+
+            {showBackgroundControls && selectedElement && (
+              <div className="removal-controls">
               <label>
                 <span>Remover fundo automático</span>
                 <input
@@ -1350,11 +1638,28 @@ function App() {
                   step="1"
                   value={tolerance}
                   onChange={(event) => setTolerance(Number(event.target.value))}
+                  onDoubleClick={() => setTolerance(28)}
                 />
                 <strong>{tolerance}%</strong>
               </label>
               <button type="button" onClick={() => void handleRemoveBackground()}>
                 Aplicar remoção
+              </button>
+              <label>
+                <span>Refinar arestas</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="5"
+                  step="1"
+                  value={edgeRadius}
+                  onChange={(event) => setEdgeRadius(Number(event.target.value))}
+                  onDoubleClick={() => setEdgeRadius(1)}
+                />
+                <strong>{edgeRadius}px</strong>
+              </label>
+              <button type="button" onClick={() => void handleRefineEdges()}>
+                Refinar arestas
               </button>
               <p className="panel-hint">Ou clique na arte com a varinha para apagar só a área daquela cor.</p>
               </div>
@@ -1364,6 +1669,26 @@ function App() {
           <div className="element-list-panel">
             <div className="list-header">
               <span>Elementos</span>
+              <div className="upload-box">
+                <label
+                  htmlFor="art-upload"
+                  className="upload-button add-image-button"
+                  title="Adicionar imagem"
+                  aria-label="Adicionar imagem"
+                >
+                  <Plus aria-hidden="true" />
+                </label>
+                <input
+                  id="art-upload"
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={(event) => {
+                    void handleAddImages(event.target.files);
+                    event.target.value = '';
+                  }}
+                />
+              </div>
             </div>
             <ul>
               {activeSideState.elements.map((element) => (

@@ -1,5 +1,5 @@
 export type Side = 'front' | 'back';
-export type MockupId = 'black' | 'white' | 'wine' | 'gray' | 'navy';
+export type MockupId = 'black' | 'white' | 'wine' | 'gray' | 'navy' | 'yellow' | 'purple' | 'brown';
 export type ToolMode = 'select' | 'eraser' | 'remove-bg';
 
 export type RGB = [number, number, number];
@@ -11,6 +11,8 @@ export interface ColorLayer {
   share: number;
   /** Intensidade: 1 = original, 0 = oculta. */
   level: number;
+  /** Cor que substitui a detectada (mantém o sombreado); ausente = cor original. */
+  replacement?: RGB;
 }
 
 export interface DesignElement {

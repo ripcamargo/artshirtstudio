@@ -211,13 +211,23 @@ function getColorMap(imageSrc: string, palette: RGB[]) {
 }
 
 export function hasActiveColorLayers(layers?: ColorLayer[]): layers is ColorLayer[] {
-  return Boolean(layers?.some((layer) => layer.level < 1));
+  return Boolean(layers?.some((layer) => layer.level < 1 || layer.replacement));
 }
 
-/** Aplica a intensidade de cada cor como transparência, sem alterar a imagem original. */
+/** Aplica a intensidade (transparência) e a troca de cor de cada camada, sem alterar a imagem original. */
 export async function renderColorLayers(imageSrc: string, layers: ColorLayer[]): Promise<ImageData> {
   const map = await getColorMap(imageSrc, layers.map((layer) => layer.color));
   const levels = layers.map((layer) => Math.max(0, Math.min(1, layer.level)));
+  // Deslocamento aplicado a cada pixel da camada: nova cor - cor detectada (preserva sombras e bordas suaves).
+  const shifts = layers.map((layer) =>
+    layer.replacement
+      ? [
+          layer.replacement[0] - layer.color[0],
+          layer.replacement[1] - layer.color[1],
+          layer.replacement[2] - layer.color[2],
+        ]
+      : [0, 0, 0],
+  );
   const output = new ImageData(map.width, map.height);
   const out = output.data;
   out.set(map.base);
@@ -228,9 +238,18 @@ export async function renderColorLayers(imageSrc: string, layers: ColorLayer[]):
       continue;
     }
 
+    const first = map.nearest[p];
+    const next = map.second[p];
     const t = map.blend[p] / 255;
-    const level = levels[map.nearest[p]] * (1 - t) + levels[map.second[p]] * t;
+    const level = levels[first] * (1 - t) + levels[next] * t;
     out[p * 4 + 3] = alpha * level;
+
+    for (let channel = 0; channel < 3; channel += 1) {
+      const shift = shifts[first][channel] * (1 - t) + shifts[next][channel] * t;
+      if (shift !== 0) {
+        out[p * 4 + channel] = Math.max(0, Math.min(255, map.base[p * 4 + channel] + shift));
+      }
+    }
   }
 
   return output;
