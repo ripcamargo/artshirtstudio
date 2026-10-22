@@ -1,5 +1,10 @@
 import type { DesignElement } from '../types/editor';
 import { hasActiveColorLayers, renderColorLayers } from './colorLayers';
+import { getFabricRelief, shadeArtWithFabric } from './fabricShading';
+
+/** Largura de referência da camiseta na prévia e tamanho mínimo da arte (px nessa referência). */
+const REFERENCE_SHIRT_WIDTH = 760;
+const MIN_ART_SIZE = 40;
 
 export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -68,11 +73,15 @@ async function prepareElementImage(element: DesignElement): Promise<HTMLCanvasEl
 export async function renderMockupComposition({
   mockupImage,
   elements,
+  fabricStrength = 0,
 }: {
   mockupImage: string;
   elements: DesignElement[];
+  /** 0..1: quanto das dobras da camiseta aparece sobre a arte. */
+  fabricStrength?: number;
 }): Promise<string> {
   const base = await loadImage(mockupImage);
+  const relief = fabricStrength > 0 ? await getFabricRelief(mockupImage) : null;
   const canvas = document.createElement('canvas');
   const canvasWidth = base.naturalWidth || base.width || 4000;
   const canvasHeight = base.naturalHeight || base.height || 4000;
@@ -93,14 +102,42 @@ export async function renderMockupComposition({
       continue;
     }
 
-    const image = await prepareElementImage(element);
+    let image = await prepareElementImage(element);
     const naturalWidth = image.width;
     const naturalHeight = image.height;
     const normalizedX = element.x > 1 ? element.x / 1000 : element.x;
     const normalizedY = element.y > 1 ? element.y / 1000 : element.y;
-    const scaleFactor = Math.min(canvasWidth, canvasHeight) / 1000;
-    const width = naturalWidth * element.scale * scaleFactor;
-    const height = naturalHeight * element.scale * scaleFactor;
+    // Mesma regra da prévia: a arte mede `natural * escala * 0.45` px numa camiseta de 760px de largura
+    // (e nunca menos que 40px), mantida proporcional à largura da camiseta no PNG.
+    const scaleFactor = (0.45 * canvasWidth) / REFERENCE_SHIRT_WIDTH;
+    const minSize = (MIN_ART_SIZE * canvasWidth) / REFERENCE_SHIRT_WIDTH;
+    const width = Math.max(minSize, naturalWidth * element.scale * scaleFactor);
+    const height = Math.max(minSize, naturalHeight * element.scale * scaleFactor);
+
+    if (relief) {
+      const shaded = document.createElement('canvas');
+      shaded.width = Math.max(1, Math.round(width));
+      shaded.height = Math.max(1, Math.round(height));
+      const shadedContext = shaded.getContext('2d', { willReadFrequently: true });
+      if (shadedContext) {
+        shadedContext.imageSmoothingQuality = 'high';
+        shadedContext.drawImage(image, 0, 0, shaded.width, shaded.height);
+        const fabricOptions = {
+          art: shaded,
+          relief,
+          strength: fabricStrength,
+          centerX: normalizedX * canvasWidth,
+          centerY: normalizedY * canvasHeight,
+          boxWidth: width,
+          boxHeight: height,
+          rotation: (element.rotation * Math.PI) / 180,
+          contentWidth: canvasWidth,
+          contentHeight: canvasHeight,
+        };
+        shadeArtWithFabric(fabricOptions);
+        image = shaded;
+      }
+    }
 
     context.save();
     context.translate(normalizedX * canvasWidth, normalizedY * canvasHeight);

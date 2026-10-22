@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Plus, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { MOCKUP_BY_ID, MOCKUPS } from './config/mockups';
 import { addStroke, refineEdges, removeColorAt, removeSolidBackground } from './utils/backgroundRemoval';
+import { getFabricRelief, shadeArtWithFabric } from './utils/fabricShading';
 import { detectColors, hasActiveColorLayers, renderColorLayers, toHex } from './utils/colorLayers';
 import { applyEraserToImage, loadImage, renderMockupComposition, saturationToFactor } from './utils/canvasRenderer';
 import { exportZip } from './utils/zipExporter';
@@ -152,34 +153,110 @@ function normalizePosition(value: number) {
   return value;
 }
 
-/** Mostra a arte; quando há cores reduzidas/ocultas, desenha a versão processada num canvas. */
-function ArtImage({ element }: { element: DesignElement }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const layers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
+interface FabricShading {
+  relief: HTMLCanvasElement;
+  /** 0..1 */
+  strength: number;
+  contentWidth: number;
+  contentHeight: number;
+}
 
+/** Resolução máxima (lado maior) do canvas que recebe o sombreado de tecido. */
+const SHADED_ART_MAX_SIZE = 1024;
+
+/**
+ * Mostra a arte. Com cores reduzidas/trocadas ou com o efeito de tecido, desenha a versão processada
+ * num canvas (a arte original nunca é alterada).
+ */
+function ArtImage({ element, shading }: { element: DesignElement; shading: FabricShading | null }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const baseRef = useRef<HTMLCanvasElement | null>(null);
+  const [baseVersion, setBaseVersion] = useState(0);
+  const layers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
+  const useCanvas = Boolean(layers || shading);
+
+  // Arte-base (já com as cores ajustadas), redesenhada só quando a imagem ou as cores mudam.
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!layers || !canvas) {
+    if (!useCanvas) {
       return;
     }
 
     let cancelled = false;
-    void renderColorLayers(element.image, layers).then((imageData) => {
-      if (cancelled) {
-        return;
+    const prepare = async () => {
+      const base = document.createElement('canvas');
+      if (layers) {
+        const imageData = await renderColorLayers(element.image, layers);
+        base.width = imageData.width;
+        base.height = imageData.height;
+        base.getContext('2d')?.putImageData(imageData, 0, 0);
+      } else {
+        const image = await loadImage(element.image);
+        base.width = image.naturalWidth || image.width;
+        base.height = image.naturalHeight || image.height;
+        base.getContext('2d')?.drawImage(image, 0, 0);
       }
 
-      canvas.width = imageData.width;
-      canvas.height = imageData.height;
-      canvas.getContext('2d')?.putImageData(imageData, 0, 0);
-    });
+      if (!cancelled) {
+        baseRef.current = base;
+        setBaseVersion((version) => version + 1);
+      }
+    };
 
+    void prepare();
     return () => {
       cancelled = true;
     };
-  }, [element.image, layers]);
+  }, [element.image, layers, useCanvas]);
 
-  if (!layers) {
+  const x = normalizePosition(element.x);
+  const y = normalizePosition(element.y);
+
+  // Desenha na posição atual: o sombreado depende de onde a arte está sobre a camiseta.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const base = baseRef.current;
+    if (!canvas || !base || !useCanvas) {
+      return;
+    }
+
+    if (!shading) {
+      canvas.width = base.width;
+      canvas.height = base.height;
+      canvas.getContext('2d')?.drawImage(base, 0, 0);
+      return;
+    }
+
+    const boxWidth = Math.max(40, (element.naturalWidth * element.scale * 0.45 * shading.contentWidth) / 760);
+    const boxHeight = Math.max(40, (element.naturalHeight * element.scale * 0.45 * shading.contentWidth) / 760);
+    const ratio = Math.min(1, SHADED_ART_MAX_SIZE / Math.max(base.width, base.height));
+    const width = Math.max(1, Math.round(base.width * ratio));
+    const height = Math.max(1, Math.round((width * boxHeight) / boxWidth));
+
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      return;
+    }
+
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(base, 0, 0, width, height);
+    shadeArtWithFabric({
+      art: canvas,
+      relief: shading.relief,
+      strength: shading.strength,
+      centerX: x * shading.contentWidth,
+      centerY: y * shading.contentHeight,
+      boxWidth,
+      boxHeight,
+      rotation: (element.rotation * Math.PI) / 180,
+      contentWidth: shading.contentWidth,
+      contentHeight: shading.contentHeight,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseVersion, useCanvas, shading?.relief, shading?.strength, shading?.contentWidth, shading?.contentHeight, x, y, element.scale, element.rotation, element.naturalWidth, element.naturalHeight]);
+
+  if (!useCanvas) {
     return <img src={element.image} alt={element.name} draggable={false} />;
   }
 
@@ -206,6 +283,9 @@ function App() {
   const [strokeWidth, setStrokeWidth] = useState(1);
   const [strokeColor, setStrokeColor] = useState('#ffffff');
   const [colorCount, setColorCount] = useState(8);
+  const [fabricEffect, setFabricEffect] = useState(15);
+  const [relief, setRelief] = useState<HTMLCanvasElement | null>(null);
+  const [contentSize, setContentSize] = useState({ width: 0, height: 0 });
   const [detectingColors, setDetectingColors] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -229,6 +309,46 @@ function App() {
   const [historyCounts, setHistoryCounts] = useState({ past: 0, future: 0 });
 
   const activeMockup = MOCKUP_BY_ID[state.activeColor];
+  const activeMockupImage = activeMockup[state.activeSide];
+
+  // Relevo das dobras da camiseta que está na tela (calculado uma vez por foto e guardado).
+  useEffect(() => {
+    let cancelled = false;
+    void getFabricRelief(activeMockupImage)
+      .then((canvas) => {
+        if (!cancelled) {
+          setRelief(canvas);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRelief(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMockupImage]);
+
+  // Tamanho da camiseta na tela (sem zoom): o sombreado depende dele.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) {
+      return;
+    }
+
+    const update = () => setContentSize({ width: content.offsetWidth, height: content.offsetHeight });
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
+  const fabricShading: FabricShading | null =
+    relief && fabricEffect > 0 && contentSize.width > 0
+      ? { relief, strength: fabricEffect / 100, contentWidth: contentSize.width, contentHeight: contentSize.height }
+      : null;
   const activeSideState = state[state.activeSide];
   const selectedElement =
     activeSideState.elements.find((element) => element.id === activeSideState.selectedId) ?? null;
@@ -905,6 +1025,7 @@ function App() {
           const png = await renderMockupComposition({
             mockupImage: mockup[side.id],
             elements: state[side.id].elements,
+            fabricStrength: fabricEffect / 100,
           });
 
           files.push({
@@ -1312,7 +1433,7 @@ function App() {
                   onPointerMove={(event) => handlePointerMove(event, element)}
                   onPointerUp={handlePointerUp}
                 >
-                  <ArtImage element={element} />
+                  <ArtImage element={element} shading={fabricShading} />
                 </div>
               );
             })}
@@ -1428,6 +1549,21 @@ function App() {
                     }}
                   />
                   <strong>{`${Math.round((selectedElement.opacity || 0) * 100)}%`}</strong>
+                </label>
+
+                <label>
+                  <span>Efeito do tecido</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={fabricEffect}
+                    onChange={(event) => setFabricEffect(Number(event.target.value))}
+                    onDoubleClick={() => setFabricEffect(15)}
+                    title="Luz e sombra das dobras da camiseta sobre a arte (vale para todas as artes e para a exportação)"
+                  />
+                  <strong>{fabricEffect === 0 ? 'Off' : `${fabricEffect}%`}</strong>
                 </label>
 
                 <details className="panel-section">
