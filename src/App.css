@@ -973,3 +973,413 @@
 .saturation-row {
   margin-bottom: 12px;
 }
+
+/* Resumo das cores no painel (a edição fica no modal). */
+.color-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.color-summary span {
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(237, 241, 255, 0.3);
+  border-radius: 5px;
+}
+
+.color-summary span.hidden-color {
+  opacity: 0.3;
+}
+
+/* Editor de cores em tela quase cheia, com margem pequena para parecer uma janela. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: stretch;
+  padding: 20px;
+  background: rgba(5, 7, 11, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.color-modal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(142, 152, 180, 0.28);
+  border-radius: 20px;
+  background: #11141b;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+}
+
+.color-modal-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  background: rgba(12, 14, 18, 0.88);
+}
+
+.color-modal-stage:active {
+  cursor: grabbing;
+}
+
+.color-modal-stage.backdrop-light {
+  background: #f1f2f4;
+}
+
+.color-modal-stage.backdrop-dark {
+  background: #14161b;
+}
+
+.color-modal-stage.backdrop-checker {
+  background:
+    conic-gradient(#cfd2d8 25%, #ffffff 0 50%, #cfd2d8 0 75%, #ffffff 0) 0 0 / 24px 24px;
+}
+
+.color-modal-content {
+  position: relative;
+  display: grid;
+  place-items: center;
+  place-self: center;
+  height: 100%;
+  max-width: 100%;
+  aspect-ratio: 928 / 1141;
+  container-type: inline-size;
+  transform-origin: center;
+}
+
+.color-modal-art {
+  pointer-events: none;
+  cursor: inherit;
+}
+
+.color-modal-tools {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: default;
+}
+
+.backdrop-switch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(142, 152, 180, 0.28);
+  border-radius: 12px;
+  background: rgba(15, 18, 24, 0.85);
+}
+
+.backdrop-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #edf1ff;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.backdrop-switch button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.backdrop-switch button.active,
+.backdrop-switch button:hover {
+  background: linear-gradient(135deg, #7a5cff 0%, #43d1ff 100%);
+  color: #fff;
+}
+
+.zoom-readout {
+  min-width: 3em;
+  padding: 0 6px;
+  color: rgba(219, 227, 255, 0.72);
+  font-size: 0.75rem;
+  text-align: right;
+}
+
+.color-modal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  padding: 18px;
+  overflow-y: auto;
+  border-left: 1px solid rgba(142, 152, 180, 0.2);
+  color: #edf1ff;
+}
+
+.color-modal-panel button {
+  border: 1px solid rgba(156, 170, 196, 0.18);
+  background: rgba(255, 255, 255, 0.02);
+  color: #edf1ff;
+  border-radius: 12px;
+  padding: 0.7rem 0.9rem;
+  cursor: pointer;
+  transition: 160ms ease;
+}
+
+.color-modal-panel button:hover:not(:disabled) {
+  background: linear-gradient(135deg, #7a5cff 0%, #43d1ff 100%);
+  border-color: transparent;
+  color: #fff;
+}
+
+.color-modal-panel button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.color-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.color-modal-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.color-modal-header-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.color-modal-header-actions .icon-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.color-modal-header-actions .icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.color-modal-detect {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.color-modal-detect label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
+  color: #dde4fa;
+  font-size: 0.8rem;
+}
+
+.color-modal-detect label > span {
+  grid-column: 1 / -1;
+}
+
+.color-modal-detect input[type='range'] {
+  width: 100%;
+  margin: 0;
+}
+
+.color-modal-detect strong {
+  color: rgba(174, 184, 205, 0.6);
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+
+.color-modal-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.color-modal-list li {
+  grid-template-columns: 30px minmax(0, 1fr) 38px 32px;
+}
+
+.color-modal-list .color-layer-swatch {
+  width: 30px;
+  height: 30px;
+}
+
+.color-modal-list .icon-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.color-modal-list .icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.color-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(142, 152, 180, 0.14);
+}
+
+.color-modal-footer button {
+  min-width: 96px;
+}
+
+@media (max-width: 900px) {
+  .color-modal {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+}
+
+.export-art-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  color: #dde4fa;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.export-art-option input {
+  margin: 2px 0 0;
+}
+
+
+/* Abas e blocos da janela de foco. */
+.studio-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(142, 152, 180, 0.2);
+  border-radius: 12px;
+}
+
+.color-modal-panel .studio-tabs button {
+  padding: 0.45rem 0;
+  border-color: transparent;
+  background: transparent;
+  font-size: 0.78rem;
+}
+
+.color-modal-panel .studio-tabs button.active {
+  background: linear-gradient(135deg, #7a5cff 0%, #43d1ff 100%);
+  color: #fff;
+}
+
+.studio-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.studio-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.studio-section .studio-slider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
+  color: #dde4fa;
+  font-size: 0.8rem;
+}
+
+.studio-slider > span {
+  grid-column: 1 / -1;
+}
+
+.studio-slider input[type='range'] {
+  width: 100%;
+  margin: 0;
+}
+
+.studio-slider strong {
+  color: rgba(174, 184, 205, 0.6);
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+
+.studio-row {
+  display: flex;
+  gap: 8px;
+}
+
+.studio-row button:not(.icon-button) {
+  flex: 1;
+}
+
+.color-modal-panel .studio-row .icon-button {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  padding: 0;
+}
+
+.color-modal-panel .studio-row .icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.studio-row input.stroke-color {
+  flex: 0 0 44px;
+  width: 44px;
+  padding: 2px;
+  border: 1px solid rgba(153, 164, 196, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.studio-notice {
+  min-height: 1.1em;
+  margin: 0;
+  color: rgba(219, 227, 255, 0.6);
+  font-size: 0.75rem;
+}
+
+.color-modal-stage.tool-erase {
+  cursor: none;
+}
+
+.color-modal-stage.tool-background {
+  cursor: crosshair;
+}
+
+.color-modal-stage .eraser-cursor {
+  pointer-events: none;
+}

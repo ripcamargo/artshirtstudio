@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Plus, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { Check, Download, Eraser, Eye, EyeOff, Minus, MousePointer2, Plus, Redo2, Undo2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { MOCKUP_BY_ID, MOCKUPS } from './config/mockups';
 import { addStroke, refineEdges, removeColorAt, removeSolidBackground } from './utils/backgroundRemoval';
-import { getFabricRelief, shadeArtWithFabric } from './utils/fabricShading';
-import { detectColors, hasActiveColorLayers, renderColorLayers, toHex } from './utils/colorLayers';
-import { applyEraserToImage, loadImage, renderMockupComposition, saturationToFactor } from './utils/canvasRenderer';
+import { ArtImage, type FabricShading } from './components/ArtImage';
+import { ArtStudioModal, type StudioTab } from './components/ArtStudioModal';
+import { normalizePosition, pointerToArtPixel, toStagePoint } from './utils/geometry';
+import { getFabricRelief } from './utils/fabricShading';
+import { toHex } from './utils/colorLayers';
+import { applyEraserToImage, loadImage, renderArtOnly, renderMockupComposition, saturationToFactor } from './utils/canvasRenderer';
 import { exportZip } from './utils/zipExporter';
-import type { AppState, ColorLayer, DesignElement, MockupId, Side, ToolMode } from './types/editor';
+import type { AppState, DesignElement, MockupId, Side, ToolMode } from './types/editor';
 import './App.css';
 
 const STORAGE_KEY = 'tshirt-mockup-creator-v1';
@@ -16,32 +19,6 @@ const EXPORT_SIDES: Array<{ id: Side; label: string; fileSuffix: string }> = [
   { id: 'front', label: 'Frente', fileSuffix: 'frente' },
   { id: 'back', label: 'Costas', fileSuffix: 'costas' },
 ];
-
-interface StagePoint {
-  /** Posição no palco em pixels sem zoom (o mesmo sistema de coordenadas das artes). */
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-/**
- * Converte o ponteiro para coordenadas do palco sem zoom. O zoom é só visual (transform),
- * então desfazer a escala aqui garante que posição, borracha etc. não mudam com ele.
- */
-function toStagePoint(content: HTMLElement, clientX: number, clientY: number): StagePoint {
-  const rect = content.getBoundingClientRect();
-  const width = content.offsetWidth;
-  const height = content.offsetHeight;
-  const scale = rect.width / width || 1;
-
-  return {
-    x: (clientX - rect.left) / scale,
-    y: (clientY - rect.top) / scale,
-    width,
-    height,
-  };
-}
 
 function clampPan(pan: { x: number; y: number }, zoom: number, stage: HTMLElement | null) {
   if (!stage) {
@@ -145,124 +122,6 @@ function toSafeFileName(value: string) {
   return slugify(value).replace(/^-+|-+$/g, '') || 'arte';
 }
 
-function normalizePosition(value: number) {
-  if (value > 1) {
-    return value / 1000;
-  }
-
-  return value;
-}
-
-interface FabricShading {
-  relief: HTMLCanvasElement;
-  /** 0..1 */
-  strength: number;
-  contentWidth: number;
-  contentHeight: number;
-}
-
-/** Resolução máxima (lado maior) do canvas que recebe o sombreado de tecido. */
-const SHADED_ART_MAX_SIZE = 1024;
-
-/**
- * Mostra a arte. Com cores reduzidas/trocadas ou com o efeito de tecido, desenha a versão processada
- * num canvas (a arte original nunca é alterada).
- */
-function ArtImage({ element, shading }: { element: DesignElement; shading: FabricShading | null }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const baseRef = useRef<HTMLCanvasElement | null>(null);
-  const [baseVersion, setBaseVersion] = useState(0);
-  const layers = hasActiveColorLayers(element.colorLayers) ? element.colorLayers : null;
-  const useCanvas = Boolean(layers || shading);
-
-  // Arte-base (já com as cores ajustadas), redesenhada só quando a imagem ou as cores mudam.
-  useEffect(() => {
-    if (!useCanvas) {
-      return;
-    }
-
-    let cancelled = false;
-    const prepare = async () => {
-      const base = document.createElement('canvas');
-      if (layers) {
-        const imageData = await renderColorLayers(element.image, layers);
-        base.width = imageData.width;
-        base.height = imageData.height;
-        base.getContext('2d')?.putImageData(imageData, 0, 0);
-      } else {
-        const image = await loadImage(element.image);
-        base.width = image.naturalWidth || image.width;
-        base.height = image.naturalHeight || image.height;
-        base.getContext('2d')?.drawImage(image, 0, 0);
-      }
-
-      if (!cancelled) {
-        baseRef.current = base;
-        setBaseVersion((version) => version + 1);
-      }
-    };
-
-    void prepare();
-    return () => {
-      cancelled = true;
-    };
-  }, [element.image, layers, useCanvas]);
-
-  const x = normalizePosition(element.x);
-  const y = normalizePosition(element.y);
-
-  // Desenha na posição atual: o sombreado depende de onde a arte está sobre a camiseta.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const base = baseRef.current;
-    if (!canvas || !base || !useCanvas) {
-      return;
-    }
-
-    if (!shading) {
-      canvas.width = base.width;
-      canvas.height = base.height;
-      canvas.getContext('2d')?.drawImage(base, 0, 0);
-      return;
-    }
-
-    const boxWidth = Math.max(40, (element.naturalWidth * element.scale * 0.45 * shading.contentWidth) / 760);
-    const boxHeight = Math.max(40, (element.naturalHeight * element.scale * 0.45 * shading.contentWidth) / 760);
-    const ratio = Math.min(1, SHADED_ART_MAX_SIZE / Math.max(base.width, base.height));
-    const width = Math.max(1, Math.round(base.width * ratio));
-    const height = Math.max(1, Math.round((width * boxHeight) / boxWidth));
-
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) {
-      return;
-    }
-
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(base, 0, 0, width, height);
-    shadeArtWithFabric({
-      art: canvas,
-      relief: shading.relief,
-      strength: shading.strength,
-      centerX: x * shading.contentWidth,
-      centerY: y * shading.contentHeight,
-      boxWidth,
-      boxHeight,
-      rotation: (element.rotation * Math.PI) / 180,
-      contentWidth: shading.contentWidth,
-      contentHeight: shading.contentHeight,
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseVersion, useCanvas, shading?.relief, shading?.strength, shading?.contentWidth, shading?.contentHeight, x, y, element.scale, element.rotation, element.naturalWidth, element.naturalHeight]);
-
-  if (!useCanvas) {
-    return <img src={element.image} alt={element.name} draggable={false} />;
-  }
-
-  return <canvas ref={canvasRef} role="img" aria-label={element.name} />;
-}
-
 function App() {
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -284,9 +143,10 @@ function App() {
   const [strokeColor, setStrokeColor] = useState('#ffffff');
   const [colorCount, setColorCount] = useState(8);
   const [fabricEffect, setFabricEffect] = useState(15);
+  const [includeArt, setIncludeArt] = useState(true);
   const [relief, setRelief] = useState<HTMLCanvasElement | null>(null);
   const [contentSize, setContentSize] = useState({ width: 0, height: 0 });
-  const [detectingColors, setDetectingColors] = useState(false);
+  const [studioTab, setStudioTab] = useState<StudioTab | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [status, setStatus] = useState('Pronto');
@@ -344,6 +204,9 @@ function App() {
     observer.observe(content);
     return () => observer.disconnect();
   }, []);
+
+  /** O estúdio abre na aba da ferramenta ativa: cores, fundo (varinha) ou apagar (borracha). */
+  const studioTabForTool: StudioTab = toolMode === 'eraser' ? 'erase' : toolMode === 'remove-bg' ? 'background' : 'colors';
 
   const fabricShading: FabricShading | null =
     relief && fabricEffect > 0 && contentSize.width > 0
@@ -430,6 +293,8 @@ function App() {
   });
 
   // Ações dos atalhos de teclado; atualizada a cada render para o listener (registrado uma vez) não ficar com estado velho.
+  const colorEditorOpenRef = useRef(false);
+  colorEditorOpenRef.current = studioTab !== null;
   const keyboardActionsRef = useRef<{
     nudgeSelected: (dx: number, dy: number, fast: boolean, repeat: boolean) => boolean;
     resizeTool: (direction: 1 | -1) => void;
@@ -485,7 +350,8 @@ function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (isTextField(event.target)) {
+      // Com o editor de cores aberto, os atalhos da tela principal ficam desligados.
+      if (colorEditorOpenRef.current || isTextField(event.target)) {
         return;
       }
 
@@ -746,36 +612,7 @@ function App() {
       return null;
     }
 
-    const {
-      x: pointerX,
-      y: pointerY,
-      width: stageWidth,
-      height: stageHeight,
-    } = toStagePoint(contentRef.current, event.clientX, event.clientY);
-    const centerX = normalizePosition(element.x) * stageWidth;
-    const centerY = normalizePosition(element.y) * stageHeight;
-    // Mesmo tamanho exibido na tela (ver cqw no render): proporcional à largura da camiseta.
-    const displayWidth = Math.max(40, (element.naturalWidth * element.scale * 0.45 * stageWidth) / 760);
-    const displayHeight = Math.max(40, (element.naturalHeight * element.scale * 0.45 * stageWidth) / 760);
-    const imageScale = Math.min(
-      displayWidth / element.naturalWidth,
-      displayHeight / element.naturalHeight,
-    );
-    const imageWidth = element.naturalWidth * imageScale;
-    const imageHeight = element.naturalHeight * imageScale;
-    const radians = (element.rotation * Math.PI) / 180;
-    const deltaX = pointerX - centerX;
-    const deltaY = pointerY - centerY;
-    const localDisplayX = deltaX * Math.cos(radians) + deltaY * Math.sin(radians);
-    const localDisplayY = -deltaX * Math.sin(radians) + deltaY * Math.cos(radians);
-    const localX = (localDisplayX + imageWidth / 2) / imageScale;
-    const localY = (localDisplayY + imageHeight / 2) / imageScale;
-
-    if (localX < 0 || localX > element.naturalWidth || localY < 0 || localY > element.naturalHeight) {
-      return null;
-    }
-
-    return { x: localX, y: localY, imageScale };
+    return pointerToArtPixel(contentRef.current, event.clientX, event.clientY, element);
   };
 
   const applyEraser = async (event: React.PointerEvent<HTMLDivElement>, element: DesignElement) => {
@@ -935,51 +772,6 @@ function App() {
     }
   };
 
-  const handleDetectColors = async () => {
-    if (!selectedElement) {
-      return;
-    }
-
-    setDetectingColors(true);
-    setStatus('Analisando cores...');
-    try {
-      const layers = await detectColors(selectedElement.image, colorCount);
-      checkpoint();
-      updateSelectedElement({ colorLayers: layers });
-      setStatus(`${layers.length} cores encontradas`);
-    } catch {
-      setStatus('Não foi possível analisar as cores');
-    } finally {
-      setDetectingColors(false);
-    }
-  };
-
-  const updateColorLayer = (layerId: string, patch: Partial<ColorLayer>) => {
-    if (!selectedElement?.colorLayers) {
-      return;
-    }
-
-    updateSelectedElement({
-      colorLayers: selectedElement.colorLayers.map((layer) =>
-        layer.id === layerId ? { ...layer, ...patch } : layer,
-      ),
-    });
-  };
-
-  const resetColorLayers = () => {
-    if (!selectedElement?.colorLayers) {
-      return;
-    }
-
-    checkpoint();
-    updateSelectedElement({
-      colorLayers: selectedElement.colorLayers.map(({ replacement: _replacement, ...layer }) => ({
-        ...layer,
-        level: 1,
-      })),
-    });
-  };
-
   const toggleColorSelection = (colorId: MockupId) => {
     setSelectedColors((current) =>
       current.includes(colorId)
@@ -1002,7 +794,7 @@ function App() {
       return;
     }
 
-    if (selectedColors.length === 0) {
+    if (selectedColors.length === 0 && !includeArt) {
       setStatus('Selecione pelo menos uma cor');
       return;
     }
@@ -1033,6 +825,21 @@ function App() {
             dataUrl: png,
           });
         }
+      }
+
+      // A arte sozinha (fundo transparente), na maior resolução que o navegador permite.
+      if (includeArt) {
+        for (const side of sidesToExport) {
+          const art = await renderArtOnly(state[side.id].elements);
+          if (art) {
+            files.push({ name: `${toSafeFileName(state.productName)}-arte-${side.fileSuffix}.png`, dataUrl: art });
+          }
+        }
+      }
+
+      if (files.length === 0) {
+        setStatus('Nada para exportar: adicione uma arte visível');
+        return;
       }
 
       await exportZip({
@@ -1350,12 +1157,19 @@ function App() {
                       })}
                     </div>
                   </div>
+                  <label className="export-art-option">
+                    <input type="checkbox" checked={includeArt} onChange={() => setIncludeArt((value) => !value)} />
+                    <span>Baixar também a arte (PNG transparente, na maior resolução)</span>
+                  </label>
                   <button
                     className="primary-action"
                     type="button"
                     onClick={() => void handleExportAll()}
                     disabled={
-                      exporting || !state.productName.trim() || selectedColors.length === 0 || selectedSides.length === 0
+                      exporting ||
+                      !state.productName.trim() ||
+                      (selectedColors.length === 0 && !includeArt) ||
+                      selectedSides.length === 0
                     }
                     aria-busy={exporting || undefined}
                   >
@@ -1363,11 +1177,11 @@ function App() {
                       ? 'Exportando...'
                       : !state.productName.trim()
                         ? 'Preencha o nome da arte'
-                        : selectedColors.length === 0
+                        : selectedColors.length === 0 && !includeArt
                         ? 'Selecione uma cor'
                         : selectedSides.length === 0
                           ? 'Selecione um lado'
-                          : `Exportar ${selectedColors.length * selectedSides.length} imagens`}
+                          : `Exportar ${selectedColors.length * selectedSides.length} imagens${includeArt ? ' + arte' : ''}`}
                   </button>
                 </div>
               )}
@@ -1432,6 +1246,12 @@ function App() {
                   onPointerDown={(event) => handlePointerDown(event, element)}
                   onPointerMove={(event) => handlePointerMove(event, element)}
                   onPointerUp={handlePointerUp}
+                  onDoubleClick={() => {
+                    if (toolMode === 'select') {
+                      handleSelectElement(element.id);
+                      setStudioTab('colors');
+                    }
+                  }}
                 >
                   <ArtImage element={element} shading={fabricShading} />
                 </div>
@@ -1593,118 +1413,22 @@ function App() {
                       </strong>
                     </label>
                   </div>
-              <div className="color-layers">
-                <div className="list-header color-layers-actions">
-                  {selectedElement.colorLayers && selectedElement.colorLayers.length > 0 && (
-                    <button
-                      type="button"
-                      className="icon-button"
-                      title="Restaurar todas as cores"
-                      aria-label="Restaurar todas as cores"
-                      disabled={!hasActiveColorLayers(selectedElement.colorLayers)}
-                      onClick={resetColorLayers}
-                    >
-                      <RotateCcw aria-hidden="true" />
-                    </button>
-                  )}
-                </div>
-
-                <label>
-                  <span>Quantidade de cores</span>
-                  <input
-                    type="range"
-                    min="2"
-                    max="16"
-                    step="1"
-                    value={colorCount}
-                    onChange={(event) => setColorCount(Number(event.target.value))}
-                    onDoubleClick={() => setColorCount(8)}
-                  />
-                  <strong>{`até ${colorCount}`}</strong>
-                </label>
-                <button
-                  type="button"
-                  disabled={detectingColors}
-                  onClick={() => void handleDetectColors()}
-                >
-                  {detectingColors
-                    ? 'Analisando...'
-                    : selectedElement.colorLayers
-                      ? 'Detectar novamente'
-                      : 'Detectar cores'}
-                </button>
-
-                {selectedElement.colorLayers && (
-                  <ul className="color-layer-list">
-                    {selectedElement.colorLayers.map((layer) => {
-                      const hex = toHex(layer.color);
-                      const hidden = layer.level === 0;
-
-                      return (
-                        <li key={layer.id} className={hidden ? 'hidden-color' : ''}>
-                          <label
-                            className="color-layer-swatch"
-                            style={{ backgroundColor: layer.replacement ? toHex(layer.replacement) : hex }}
-                            title={`${hex.toUpperCase()} · ${(layer.share * 100).toFixed(1)}% da arte. Clique para trocar a cor${
-                              layer.replacement ? '; duplo clique para voltar à original' : ''
-                            }`}
-                            onDoubleClick={() => {
-                              if (layer.replacement) {
-                                checkpoint();
-                                updateColorLayer(layer.id, { replacement: undefined });
-                              }
-                            }}
-                          >
-                            <input
-                              type="color"
-                              aria-label={`Trocar a cor ${hex.toUpperCase()}`}
-                              value={toHex(layer.replacement ?? layer.color)}
-                              onClick={checkpoint}
-                              onChange={(event) => {
-                                const value = event.target.value;
-                                updateColorLayer(layer.id, {
-                                  replacement: [
-                                    parseInt(value.slice(1, 3), 16),
-                                    parseInt(value.slice(3, 5), 16),
-                                    parseInt(value.slice(5, 7), 16),
-                                  ],
-                                });
-                              }}
-                            />
-                          </label>
-                          <input
-                            type="range"
-                            min="0"
-                            max="100"
-                            step="1"
-                            value={Math.round(layer.level * 100)}
-                            aria-label={`Intensidade da cor ${hex.toUpperCase()}`}
-                            onPointerDown={checkpoint}
-                            onKeyDown={checkpoint}
-                            onChange={(event) =>
-                              updateColorLayer(layer.id, { level: Number(event.target.value) / 100 })
-                            }
+                  <div className="section-body">
+                    {selectedElement.colorLayers && selectedElement.colorLayers.length > 0 && (
+                      <div className="color-summary" aria-hidden="true">
+                        {selectedElement.colorLayers.map((layer) => (
+                          <span
+                            key={layer.id}
+                            className={layer.level === 0 ? 'hidden-color' : ''}
+                            style={{ backgroundColor: toHex(layer.replacement ?? layer.color) }}
                           />
-                          <strong>{`${Math.round(layer.level * 100)}%`}</strong>
-                          <button
-                            type="button"
-                            className="icon-button"
-                            title={hidden ? 'Mostrar cor' : 'Ocultar cor'}
-                            aria-label={`${hidden ? 'Mostrar' : 'Ocultar'} cor ${hex.toUpperCase()}`}
-                            aria-pressed={hidden}
-                            onClick={() => {
-                              checkpoint();
-                              updateColorLayer(layer.id, { level: hidden ? 1 : 0 });
-                            }}
-                          >
-                            {hidden ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
+                        ))}
+                      </div>
+                    )}
+                    <button type="button" onClick={() => setStudioTab('colors')}>
+                      {selectedElement.colorLayers ? 'Editar cores' : 'Detectar cores'}
+                    </button>
+                  </div>
                 </details>
 
                 <details className="panel-section">
@@ -1833,6 +1557,11 @@ function App() {
                     type="button"
                     className="element-name"
                     onClick={() => handleSelectElement(element.id)}
+                    onDoubleClick={() => {
+                      handleSelectElement(element.id);
+                      setStudioTab(studioTabForTool);
+                    }}
+                    title="Duplo clique para editar em foco"
                   >
                     {element.name}
                   </button>
@@ -1861,6 +1590,23 @@ function App() {
           </div>
         </aside>
       </main>
+      {studioTab && selectedElement && (
+        <ArtStudioModal
+          element={selectedElement}
+          shirtImage={activeMockupImage}
+          fabric={{ relief, strength: fabricEffect / 100 }}
+          initialTab={studioTab}
+          initialColorCount={colorCount}
+          onCancel={() => setStudioTab(null)}
+          onApply={(draft, count) => {
+            checkpoint();
+            updateSelectedElement(draft);
+            setColorCount(count);
+            setStudioTab(null);
+            setStatus('Arte atualizada');
+          }}
+        />
+      )}
     </div>
   );
 }
